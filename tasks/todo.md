@@ -158,6 +158,8 @@ owner approves `SPEC.md`, `CAPABILITY-MAP.md`, and `tasks/plan.md`.
 
 - [x] Deterministic cross-platform adapter and repository end-to-end tests using
   fake package tools and temporary encrypted repositories.
+- [x] Add and publish the authoritative macOS test runbook for human and agent
+  execution.
 - [ ] Windows-to-Windows Hyper-V guest test with `--install-apps` in a disposable
   guest. Blocked in the current session because Hyper-V management is unavailable
   and enabling the feature requires an elevated Administrator session.
