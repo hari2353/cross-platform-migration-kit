@@ -124,6 +124,13 @@ be reviewed before implementation. See:
 3. [Implementation plan](tasks/plan.md)
 4. [Task checklist](tasks/todo.md)
 
+### Test Runbooks
+
+- [macOS test runbook](docs/MAC-TEST-RUNBOOK.md): authoritative instructions
+  for a human or agent testing a real Mac.
+- [Hyper-V test procedure](docs/testing-hyperv.md): Windows guest validation and
+  the limits of Hyper-V for macOS testing.
+
 ## Security Warning
 
 The repository may contain personal documents and application configuration.
