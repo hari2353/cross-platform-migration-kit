@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,7 @@ func TestInventoryExcludesRepositoryAndCredentialLikeFiles(t *testing.T) {
 	writeFile(t, filepath.Join(source, ".ssh", "id_ed25519"), "private")
 	writeFile(t, filepath.Join(source, "migration-repository", "stale.bin"), "do not copy")
 
-	items, exclusions, err := inventory(source, repository)
+	items, exclusions, err := inventoryWithOptions(source, repository, false)
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
@@ -249,4 +250,120 @@ func fileMode(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode()
+}
+
+func exclusionReason(exclusions []Exclusion, relative string) (string, bool) {
+	for _, exclusion := range exclusions {
+		if filepath.ToSlash(exclusion.RelativePath) == relative {
+			return exclusion.Reason, true
+		}
+	}
+	return "", false
+}
+
+func TestInventoryAppliesProtectedPathPolicy(t *testing.T) {
+	source := t.TempDir()
+	excluded := map[string]string{
+		"AppData/Local/Temp/junk.tmp":              "temp",
+		"AppData/Local/Google/Chrome/User Data/c":  "browser",
+		"AppData/Local/CrashDumps/crash.dmp":       "dump",
+		"AppData/Local/npm-cache/pkg.tar":          "npmcache",
+		"AppData/Roaming/Thunderbird/profiles.ini": "thunderbird",
+		"ntuser.dat":                               "hive",
+		"ntuser.dat.log1":                          "hive belt",
+		"Thumbs.db":                                "thumbs",
+		"Library/Caches/com.apple.Safari/cache.db": "mac cache",
+		".Trash/old.txt":                           "trash",
+		".DS_Store":                                "finder",
+		"Projects/demo/.cache/tool.bin":            "nested xdg cache",
+		"Projects/demo/__pycache__/x.cpython.pyc":  "bytecode",
+		"go/pkg/mod/golang.org/tool@v1/tool.go":    "module cache",
+	}
+	for relative, contents := range excluded {
+		writeFile(t, filepath.Join(source, filepath.FromSlash(relative)), contents)
+	}
+	// Personal data that must NOT be excluded.
+	kept := []string{filepath.ToSlash(filepath.Join("Documents", "keep.txt")), filepath.ToSlash(filepath.Join("Projects", "demo", "main.go"))}
+	for _, relative := range kept {
+		writeFile(t, filepath.Join(source, filepath.FromSlash(relative)), "keep")
+	}
+
+	items, exclusions, err := inventoryWithOptions(source, t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	// The walk records the top-most excluded path (the prefix directory itself
+	// for prefix rules, the file for name rules) and never captures below it.
+	for relative := range excluded {
+		covered := false
+		for _, exclusion := range exclusions {
+			if path := filepath.ToSlash(exclusion.RelativePath); relative == path || strings.HasPrefix(relative, path+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("path %q was not excluded by policy", relative)
+		}
+	}
+	for _, item := range items {
+		if _, ok := exclusionReason(exclusions, item.RelativePath); ok {
+			continue
+		}
+		found := false
+		for _, relative := range kept {
+			if item.RelativePath == relative {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("unexpected captured item: %q", item.RelativePath)
+		}
+	}
+	if len(items) != 2 {
+		t.Errorf("expected only personal data to be captured, got %#v", items)
+	}
+	if reason, ok := exclusionReason(exclusions, "AppData/Local/Temp"); !ok || reason != "volatile temporary files" {
+		t.Errorf("unexpected exclusion reason for temp dir: %q %v", reason, ok)
+	}
+}
+
+func TestCaptureReRunsIntoExistingRepository(t *testing.T) {
+	source := t.TempDir()
+	repository := filepath.Join(t.TempDir(), "repository")
+	key := bytes.Repeat([]byte{21}, KeySize)
+	writeFile(t, filepath.Join(source, "Documents", "resume.txt"), "first capture")
+
+	if _, err := Capture(source, repository, key); err != nil {
+		t.Fatalf("initial capture: %v", err)
+	}
+	// Re-running capture into the same repository (for example after an
+	// interruption or a second run) must succeed without duplicating objects.
+	manifest, err := Capture(source, repository, key)
+	if err != nil {
+		t.Fatalf("idempotent capture: %v", err)
+	}
+	if len(manifest.Items) != 1 {
+		t.Fatalf("unexpected item count: %#v", manifest.Items)
+	}
+	if err := Verify(repository, key); err != nil {
+		t.Fatalf("verify after re-capture: %v", err)
+	}
+
+	// A tampered object inside the repository is replaced, not silently reused.
+	objectPath := filepath.Join(repository, objectDir, manifest.Items[0].ID+".bin")
+	raw, err := os.ReadFile(objectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 0xFF
+	if err := os.WriteFile(objectPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Capture(source, repository, key); err != nil {
+		t.Fatalf("capture with tampered object: %v", err)
+	}
+	if err := Verify(repository, key); err != nil {
+		t.Fatalf("tampered object was not repaired during re-capture: %v", err)
+	}
 }

@@ -1,0 +1,2 @@
+# Keep scripts runnable in Unix containers regardless of checkout platform.
+*.sh text eol=lf
