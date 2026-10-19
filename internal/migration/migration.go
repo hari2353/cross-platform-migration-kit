@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -549,13 +550,32 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 			checklist = append(checklist, devChecklist...)
 		}
 	}
+	vanished := map[int]bool{}
 	for index := range items {
 		path := filepath.Join(sourceRoot, filepath.FromSlash(items[index].RelativePath))
 		objectPath := filepath.Join(repository, objectDir, items[index].ID+".bin")
 		if err := reuseOrEncryptFile(path, objectPath, key, items[index]); err != nil {
+			if isVanishedSource(err) {
+				// Live sources churn between the walk and the write (sync
+				// clients and browsers delete their own files mid-capture).
+				// Record the miss instead of aborting a multi-hour capture.
+				exclusions = append(exclusions, Exclusion{RelativePath: items[index].RelativePath, Reason: "source vanished during capture"})
+				vanished[index] = true
+				continue
+			}
 			return Manifest{}, fmt.Errorf("encrypt %s: %w", items[index].RelativePath, err)
 		}
 	}
+	if len(vanished) > 0 {
+		kept := make([]Item, 0, len(items)-len(vanished))
+		for index, item := range items {
+			if !vanished[index] {
+				kept = append(kept, item)
+			}
+		}
+		items = kept
+	}
+	sort.Slice(exclusions, func(i, j int) bool { return exclusions[i].RelativePath < exclusions[j].RelativePath })
 	manifest := Manifest{
 		Version:      1,
 		CreatedAt:    time.Now().UTC(),
@@ -867,6 +887,20 @@ func reuseOrEncryptFile(source, objectPath string, key []byte, item Item) error 
 		return nil
 	}
 	return encryptObjectFunc(source, objectPath, key, item.ID)
+}
+
+// isVanishedSource reports whether err means the source file recorded during
+// the walk disappeared before its turn to be sealed (the capture race with
+// sync clients and browser caches that prune their own logs and caches).
+func isVanishedSource(err error) bool {
+	if err == nil || !os.IsNotExist(err) {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.Errno(2) || errno == syscall.Errno(3)
+	}
+	return true
 }
 
 func encryptTempThenRename(source, target string, key []byte, objectID string) error {

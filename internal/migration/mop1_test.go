@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1588,6 +1589,55 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	}
 	if _, err := CaptureWithOptions(source, manifestBlocked, key, false, false, nil); err == nil {
 		t.Fatal("capture accepted a blocked manifest path")
+	}
+}
+
+func TestCaptureSkipsSourceVanishedDuringCapture(t *testing.T) {
+	key := bytes.Repeat([]byte{62}, KeySize)
+	source := t.TempDir()
+	for _, name := range []string{"gone.txt", "kept.txt"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seamOverride(t, &encryptObjectFunc, func(source, target string, key []byte, objectID string) error {
+		if strings.HasSuffix(source, "gone.txt") {
+			// Mirror the live-condition error: a Windows-style missing-file
+			// path error from the open at encrypt time.
+			return &fs.PathError{Op: "open", Path: source, Err: syscall.Errno(2)}
+		}
+		return encryptFile(source, target, key, objectID)
+	})
+	manifest, err := CaptureWithOptions(source, t.TempDir(), key, false, false, nil)
+	if err != nil {
+		t.Fatalf("a vanished source must not abort capture: %v", err)
+	}
+	if len(manifest.Items) != 1 || manifest.Items[0].RelativePath != "kept.txt" {
+		t.Fatalf("expected only kept.txt in items, got %+v", manifest.Items)
+	}
+	found := false
+	for _, exclusion := range manifest.Exclusions {
+		if exclusion.RelativePath == "gone.txt" && strings.Contains(exclusion.Reason, "vanished") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("gone.txt is not recorded as vanished: %+v", manifest.Exclusions)
+	}
+}
+
+func TestIsVanishedSourceSemantics(t *testing.T) {
+	if isVanishedSource(nil) {
+		t.Fatal("nil error is not a vanished source")
+	}
+	if !isVanishedSource(&fs.PathError{Op: "open", Path: "x", Err: os.ErrNotExist}) {
+		t.Fatal("os.ErrNotExist path error is a vanished source")
+	}
+	if !isVanishedSource(&fs.PathError{Op: "open", Path: "x", Err: syscall.Errno(2)}) {
+		t.Fatal("Windows file-not-found is a vanished source")
+	}
+	if isVanishedSource(errors.New("encrypt refused")) {
+		t.Fatal("plain errors are not vanished sources")
 	}
 }
 
