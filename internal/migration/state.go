@@ -31,7 +31,10 @@ type RestoreState struct {
 }
 
 func NewRestoreState(manifest Manifest, destination, profile string, overwrite bool) (RestoreState, error) {
-	bundle := BundleFingerprint(manifest)
+	bundle, err := BundleFingerprint(manifest)
+	if err != nil {
+		return RestoreState{}, err
+	}
 	plan, err := PlanFingerprint(manifest, destination, profile, overwrite)
 	if err != nil {
 		return RestoreState{}, err
@@ -47,11 +50,13 @@ func NewRestoreState(manifest Manifest, destination, profile string, overwrite b
 	}, nil
 }
 
-func BundleFingerprint(manifest Manifest) string {
-	// json.Marshal cannot fail for this primitives-only shape.
-	encoded, _ := json.Marshal(manifest)
+func BundleFingerprint(manifest Manifest) (string, error) {
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return "", fmt.Errorf("encode bundle fingerprint: %w", err)
+	}
 	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func PlanFingerprint(manifest Manifest, destination, profile string, overwrite bool) (string, error) {
@@ -61,8 +66,11 @@ func PlanFingerprint(manifest Manifest, destination, profile string, overwrite b
 		Profile     string `json:"profile"`
 		Overwrite   bool   `json:"overwrite"`
 	}{}
-	bundle := BundleFingerprint(manifest)
-	destination, err := absPath(destination)
+	bundle, err := BundleFingerprint(manifest)
+	if err != nil {
+		return "", err
+	}
+	destination, err = filepath.Abs(destination)
 	if err != nil {
 		return "", err
 	}
@@ -70,8 +78,10 @@ func PlanFingerprint(manifest Manifest, destination, profile string, overwrite b
 	fingerprint.Destination = destination
 	fingerprint.Profile = profile
 	fingerprint.Overwrite = overwrite
-	// json.Marshal cannot fail for this primitives-only shape.
-	encoded, _ := json.Marshal(fingerprint)
+	encoded, err := json.Marshal(fingerprint)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
 }
@@ -84,29 +94,33 @@ func SaveRestoreState(repository string, key []byte, state RestoreState) error {
 		state.Items = map[string]ItemState{}
 	}
 	state.UpdatedAt = time.Now().UTC()
-	// json.Marshal cannot fail for this primitives-only shape.
-	encoded, _ := json.Marshal(state)
-	// encryptBytes cannot fail for a validated 32-byte key.
-	encrypted, _ := encryptBytes(key, encoded, []byte("restore-state-v1"))
-	temporary, err := osCreateTemp(repository, ".restore-state-*.tmp")
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	encrypted, err := encryptBytes(key, encoded, []byte("restore-state-v1"))
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(repository, ".restore-state-*.tmp")
 	if err != nil {
 		return err
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := fileChmod(temporary, 0o600); err != nil {
-		fileClose(temporary)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
 		return err
 	}
-	if _, err := fileWrite(temporary, encrypted); err != nil {
-		fileClose(temporary)
+	if _, err := temporary.Write(encrypted); err != nil {
+		temporary.Close()
 		return err
 	}
-	if err := fileSync(temporary); err != nil {
-		fileClose(temporary)
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
 		return err
 	}
-	if err := fileClose(temporary); err != nil {
+	if err := temporary.Close(); err != nil {
 		return err
 	}
 	return os.Rename(temporaryPath, filepath.Join(repository, restoreStateFile))
