@@ -244,31 +244,40 @@ func (systemCommandRunner) Run(ctx context.Context, name string, args ...string)
 	return output, nil
 }
 
-// inventoryApplications probes the platform's own tooling first and falls
-// back to the Linux manager list anywhere else: a shimmed apk/pacman tool is
-// still a faithful inventory source when the native tool is unavailable.
-// shortcut: on an unsupported platform the fallback probes real PATH, so a
-// Linux CI host could run a real manager there — fine on this macOS host.
+// inventoryApplications probes the platform's own tooling first. A host
+// without it may still be a shimmed or containerized inventory source, so
+// darwin falls back to the linux-manager list; unsupported platforms refuse
+// unconditionally so a real PATH tool can never answer for a fake OS.
 func inventoryApplications(ctx context.Context, runner CommandRunner, tempDir string) ([]Application, error) {
 	if runner == nil {
 		runner = systemCommandRunner{}
 	}
-	if goosFunc() == "windows" {
+	switch goosFunc() {
+	case "windows":
 		if _, err := platformLookPath("winget"); err == nil {
 			return inventoryWindowsApplications(ctx, runner, tempDir)
 		}
-	}
-	if goosFunc() == "darwin" {
+		return nil, errors.New("winget is unavailable for the windows application inventory")
+	case "darwin":
 		if _, err := platformLookPath("brew"); err == nil {
 			return inventoryDarwinApplications(ctx, runner, tempDir)
 		}
-	}
-	for _, manager := range nativeLinuxManagers {
-		if _, err := platformLookPath(manager); err == nil {
-			return inventoryLinuxApplications(ctx, runner)
+		for _, manager := range nativeLinuxManagers {
+			if _, err := platformLookPath(manager); err == nil {
+				return inventoryLinuxApplications(ctx, runner)
+			}
 		}
+		return nil, errors.New("no application inventory tool is available (brew or a linux package manager)")
+	case "linux":
+		for _, manager := range nativeLinuxManagers {
+			if _, err := platformLookPath(manager); err == nil {
+				return inventoryLinuxApplications(ctx, runner)
+			}
+		}
+		return nil, errors.New("no supported linux package manager is available")
+	default:
+		return nil, fmt.Errorf("unsupported source platform %s", goosFunc())
 	}
-	return nil, errors.New("no supported application inventory tool is available")
 }
 
 // inventoryWindowsApplications reads the winget export the runner produced.

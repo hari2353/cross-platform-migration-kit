@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 )
@@ -88,7 +87,7 @@ func chromeExtensionIDs(extensionsDir string) ([]string, error) {
 // extension identifiers. No Chrome profile at all is an empty recipe; a
 // broken or denied profile is a hard error rather than a silent partial.
 func captureChromeSetting(home string) (Setting, []string, error) {
-	bookmarksPath := filepath.Join(chromeUserDataDirForOS(runtime.GOOS, home), "Default", "Bookmarks")
+	bookmarksPath := filepath.Join(chromeUserDataDirForOS(goosFunc(), home), "Default", "Bookmarks")
 	bookmarks, err := os.ReadFile(bookmarksPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -425,7 +424,7 @@ func restoreSettings(manifest Manifest, destination string, report *Report, over
 			if strings.TrimSpace(string(content)) == "" {
 				continue
 			}
-			profileDir := filepath.Join(chromeUserDataDirForOS(runtime.GOOS, destination), "Default")
+			profileDir := filepath.Join(chromeUserDataDirForOS(goosFunc(), destination), "Default")
 			path := filepath.Join(profileDir, "Bookmarks")
 			if restoreSkipExisting(path) {
 				report.Add(Result{Kind: "setting", ID: setting.Recipe, Path: path, Status: "skipped-existing"})

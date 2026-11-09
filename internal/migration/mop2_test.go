@@ -461,6 +461,11 @@ func TestManagedRestoreSettingsFault(t *testing.T) {
 // Capture with a denied Chrome Extensions directory
 
 func TestCaptureChromeExtensionsDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		// Permission traps don't trap for root (the docker test target);
+		// a non-root CI host — the ubuntu matrix — runs this for real.
+		t.Skip("unreadable-directory trap is meaningless under root")
+	}
 	home := t.TempDir()
 	defaults := filepath.Join(chromeUserDataDirForOS(runtime.GOOS, home), "Default")
 	// A readable Bookmarks file gets past the first guard.
@@ -760,6 +765,11 @@ func TestCaptureDevSettingsUnreadable(t *testing.T) {
 func TestPlanRestoreRefusesBlockedTarget(t *testing.T) {
 	// A target the OS cannot inspect at all (not merely missing) is refused
 	// through the symlink/reparse guard's error forwarding.
+	if os.Getuid() == 0 {
+		// chmod-000 traps don't trap for root; see the skip in
+		// TestCaptureChromeExtensionsDenied.
+		t.Skip("blocked-parent trap is meaningless under root")
+	}
 	reload := func() {
 		t.Helper()
 		if runtime.GOOS == "windows" {
