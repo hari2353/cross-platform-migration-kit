@@ -83,6 +83,10 @@ migrate restore --bundle E:\migration-repository --destination C:\Users\new-user
 # Re-run safely after fixing a skipped dependency or conflict:
 migrate resume --bundle E:\migration-repository --key-file E:\migration.key --profile personal
 
+# Turn a captured repository into a ready-to-run portable drive (launchers,
+# drive key, and optional prebuilt destination binaries):
+migrate pack --bundle E:\migration-repository --key-file E:\migration.key --binaries E:\binaries
+
 # Check the final result:
 migrate verify --bundle E:\migration-repository --destination C:\Users\new-user --key-file E:\migration.key
 migrate doctor --bundle E:\migration-repository --destination C:\Users\new-user --key-file E:\migration.key

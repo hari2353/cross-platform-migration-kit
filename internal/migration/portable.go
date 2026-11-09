@@ -1,9 +1,11 @@
 package migration
 
 import (
+	"os/exec"
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"path/filepath"
 	"strings"
 )
@@ -21,6 +23,35 @@ import (
 // The destination flow: plug the drive in, run the launcher for that platform,
 // review the plan, confirm, and the documents, settings recipes, and
 // application installs happen with no other steps.
+
+// Test seams: package-level function variables so tests can inject failures.
+// Production defaults delegate to the real os/file methods.
+var (
+	osChmod        = os.Chmod
+	fileChmod      = func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) }
+	fileWrite      = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+	fileSync       = func(f *os.File) error { return f.Sync() }
+	fileClose      = func(f *os.File) error { return f.Close() }
+	osCreateTemp   = os.CreateTemp
+	osMkdirTemp    = os.MkdirTemp
+	osMkdirAll    = os.MkdirAll
+	removePath     = os.Remove
+	// Chunks go onto the wire with the same 4-byte length header as
+	// writeChunk so decoders can frame the stream.
+	writeObjectChunk = writeChunk
+	goosFunc         = func() string { return runtime.GOOS }
+	errIsNotExist    = os.IsNotExist
+	absPath          = filepath.Abs
+	platformLookPath = exec.LookPath
+)
+
+// trimByteOrderMark strips a leading UTF-8 BOM if present.
+func trimByteOrderMark(raw []byte) []byte {
+	if len(raw) >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF {
+		return raw[3:]
+	}
+	return raw
+}
 
 const (
 	portableKeyFile      = "migration.key"

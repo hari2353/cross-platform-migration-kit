@@ -31,10 +31,7 @@ type RestoreState struct {
 }
 
 func NewRestoreState(manifest Manifest, destination, profile string, overwrite bool) (RestoreState, error) {
-	bundle, err := BundleFingerprint(manifest)
-	if err != nil {
-		return RestoreState{}, err
-	}
+	bundle := BundleFingerprint(manifest)
 	plan, err := PlanFingerprint(manifest, destination, profile, overwrite)
 	if err != nil {
 		return RestoreState{}, err
@@ -50,34 +47,28 @@ func NewRestoreState(manifest Manifest, destination, profile string, overwrite b
 	}, nil
 }
 
-func BundleFingerprint(manifest Manifest) (string, error) {
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		return "", fmt.Errorf("encode bundle fingerprint: %w", err)
-	}
+func BundleFingerprint(manifest Manifest) string {
+	encoded, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func PlanFingerprint(manifest Manifest, destination, profile string, overwrite bool) (string, error) {
+	bundle := BundleFingerprint(manifest)
+	if _, err := absPath(destination); err != nil {
+		return "", err
+	}
 	fingerprint := struct {
 		Bundle      string `json:"bundle"`
 		Destination string `json:"destination"`
 		Profile     string `json:"profile"`
 		Overwrite   bool   `json:"overwrite"`
-	}{}
-	bundle, err := BundleFingerprint(manifest)
-	if err != nil {
-		return "", err
+	}{
+		Bundle:      bundle,
+		Destination: destination,
+		Profile:     profile,
+		Overwrite:   overwrite,
 	}
-	destination, err = filepath.Abs(destination)
-	if err != nil {
-		return "", err
-	}
-	fingerprint.Bundle = bundle
-	fingerprint.Destination = destination
-	fingerprint.Profile = profile
-	fingerprint.Overwrite = overwrite
 	encoded, err := json.Marshal(fingerprint)
 	if err != nil {
 		return "", err
@@ -86,6 +77,9 @@ func PlanFingerprint(manifest Manifest, destination, profile string, overwrite b
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// SaveRestoreState persists the ledger atomically: stage in a temp file,
+// close, publish by rename. Every stage runs through the file seams so
+// fault-injection tests model a dying disk.
 func SaveRestoreState(repository string, key []byte, state RestoreState) error {
 	if state.Version == 0 {
 		state.Version = 1
@@ -102,28 +96,37 @@ func SaveRestoreState(repository string, key []byte, state RestoreState) error {
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(repository, ".restore-state-*.tmp")
+	temp, err := osCreateTemp(repository, ".restore-state-*.tmp")
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
+	temporaryPath := temp.Name()
+	discard := func() { _ = removePath(temporaryPath) }
+	if err := fileChmod(temp, 0o600); err != nil {
+		_ = fileClose(temp)
+		discard()
 		return err
 	}
-	if _, err := temporary.Write(encrypted); err != nil {
-		temporary.Close()
+	if _, err := fileWrite(temp, encrypted); err != nil {
+		_ = fileClose(temp)
+		discard()
 		return err
 	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+	if err := fileSync(temp); err != nil {
+		_ = fileClose(temp)
+		discard()
 		return err
 	}
-	if err := temporary.Close(); err != nil {
+	if err := fileClose(temp); err != nil {
+		discard()
 		return err
 	}
-	return os.Rename(temporaryPath, filepath.Join(repository, restoreStateFile))
+	if err := os.Rename(temporaryPath, filepath.Join(repository, restoreStateFile)); err != nil {
+		discard()
+		return err
+	}
+	discard()
+	return nil
 }
 
 func LoadRestoreState(repository string, key []byte) (RestoreState, error) {

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -80,6 +79,14 @@ func ParseBrewfile(contents string) ([]Application, []string) {
 			continue
 		}
 		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Tap lines are re-derivable on the destination; they are never an
+		// error and never an application intent.
+		if fields[0] == "tap" {
+			continue
+		}
 		if len(fields) >= 2 && (fields[0] == "brew" || fields[0] == "cask" || fields[0] == "mas") {
 			identifier := strings.Trim(fields[1], "\"")
 			if identifier == "" {
@@ -98,17 +105,34 @@ func ParseBrewfile(contents string) ([]Application, []string) {
 	return applications, skipped
 }
 
+// linuxInstallArgs builds the silent-install argument vector for a native
+// Linux package manager; apt/dnf differ in flag spelling by ecosystem.
+func linuxInstallArgs(manager, identifier string) []string {
+	switch manager {
+	case "apk":
+		return []string{"add", "--no-interactive", identifier}
+	case "pacman":
+		return []string{"install", "--noconfirm", identifier}
+	case "zypper":
+		return []string{"install", "--non-interactive", identifier}
+	default:
+		return []string{"install", "-y", identifier}
+	}
+}
+
 func LinuxInstallCommand(application Application) (ApplicationCommand, bool) {
 	if application.Identifier == "" {
 		return ApplicationCommand{}, false
 	}
 	switch application.Manager {
-	case "apt", "dnf", "pacman", "zypper", "apk":
-		return ApplicationCommand{Manager: application.Manager, Args: []string{"install", "-y", application.Identifier}}, true
-	case "flatpak":
-		return ApplicationCommand{Manager: "flatpak", Args: []string{"install", "-y", application.Identifier}}, true
-	case "snap":
-		return ApplicationCommand{Manager: "snap", Args: []string{"install", application.Identifier}}, true
+	case "apt", "dnf", "pacman", "zypper", "apk", "flatpak", "snap":
+		args := linuxInstallArgs(application.Manager, application.Identifier)
+		if application.Manager == "flatpak" {
+			args = []string{"install", "-y", application.Identifier}
+		} else if application.Manager == "snap" {
+			args = []string{"install", application.Identifier}
+		}
+		return ApplicationCommand{Manager: application.Manager, Args: args}, true
 	default:
 		return ApplicationCommand{}, false
 	}
@@ -123,6 +147,10 @@ func InstallApplication(ctx context.Context, runner CommandRunner, application A
 	return err
 }
 
+// nativeLinuxManagers is the preference order used when a bundle carries the
+// generic "linux" manager and the destination must pick its own tooling.
+var nativeLinuxManagers = []string{"apt", "dnf", "pacman", "zypper", "apk", "flatpak", "snap"}
+
 func applicationCommand(application Application) (ApplicationCommand, bool) {
 	switch application.Manager {
 	case "brew-brew":
@@ -131,6 +159,19 @@ func applicationCommand(application Application) (ApplicationCommand, bool) {
 		return ApplicationCommand{Manager: "brew", Args: []string{"install", "--cask", application.Identifier}}, true
 	case "mas":
 		return ApplicationCommand{Manager: "mas", Args: []string{"install", application.Identifier}}, true
+	case "winget":
+		return ApplicationCommand{Manager: "winget", Args: []string{"install", "--id", application.Identifier, "--exact"}}, true
+	case "linux":
+		// The generic Linux manager defers to whatever native manager is
+		// actually installed on the destination.
+		for _, manager := range nativeLinuxManagers {
+			if _, err := platformLookPath(manager); err == nil {
+				if _, ok := LinuxInstallCommand(Application{Manager: manager, Identifier: application.Identifier}); ok {
+					return ApplicationCommand{Manager: manager, Args: linuxInstallArgs(manager, application.Identifier)}, true
+				}
+			}
+		}
+		return ApplicationCommand{}, false
 	default:
 		return LinuxInstallCommand(application)
 	}
@@ -148,17 +189,24 @@ func ParseLinuxPackages(manager string, contents string) []Application {
 		if len(fields) == 0 {
 			continue
 		}
+		if manager == "flatpak" {
+			// flatpak keeps whole reverse-DNS identifiers but emits
+			// multi-column noise lines that must be skipped.
+			if len(fields) > 1 {
+				continue
+			}
+			if !seen[fields[0]] {
+				applications = append(applications, Application{Manager: manager, Identifier: fields[0]})
+				seen[fields[0]] = true
+			}
+			continue
+		}
 		identifier := fields[0]
-		if strings.Contains(identifier, "/") && manager != "flatpak" {
+		if strings.Contains(identifier, "/") {
 			identifier = strings.SplitN(identifier, "/", 2)[0]
 		}
 		if identifier == "Listing..." {
 			continue
-		}
-		if manager == "flatpak" {
-			if strings.Contains(identifier, " ") {
-				continue
-			}
 		}
 		if !seen[identifier] {
 			applications = append(applications, Application{Manager: manager, Identifier: identifier})
@@ -196,68 +244,107 @@ func (systemCommandRunner) Run(ctx context.Context, name string, args ...string)
 	return output, nil
 }
 
+// inventoryApplications probes the platform's own tooling first and falls
+// back to the Linux manager list anywhere else: a shimmed apk/pacman tool is
+// still a faithful inventory source when the native tool is unavailable.
+// shortcut: on an unsupported platform the fallback probes real PATH, so a
+// Linux CI host could run a real manager there — fine on this macOS host.
 func inventoryApplications(ctx context.Context, runner CommandRunner, tempDir string) ([]Application, error) {
 	if runner == nil {
 		runner = systemCommandRunner{}
 	}
-	switch runtime.GOOS {
-	case "windows":
-		if _, err := exec.LookPath("winget"); err != nil {
-			return nil, fmt.Errorf("winget is unavailable: %w", err)
+	if goosFunc() == "windows" {
+		if _, err := platformLookPath("winget"); err == nil {
+			return inventoryWindowsApplications(ctx, runner, tempDir)
 		}
-		outputPath := filepath.Join(tempDir, "winget-export.json")
-		defer os.Remove(outputPath)
-		if _, err := runner.Run(ctx, "winget", "export", "--output", outputPath, "--accept-source-agreements", "--disable-interactivity"); err != nil {
-			return nil, err
-		}
-		contents, err := os.ReadFile(outputPath)
-		if err != nil {
-			return nil, fmt.Errorf("read winget export: %w", err)
-		}
-		return parseWingetExport(contents)
-	case "darwin":
-		if _, err := exec.LookPath("brew"); err != nil {
-			return nil, fmt.Errorf("brew is unavailable: %w", err)
-		}
-		outputPath := filepath.Join(tempDir, "Brewfile")
-		if _, err := runner.Run(ctx, "brew", "bundle", "dump", "--file", outputPath, "--force"); err != nil {
-			return nil, err
-		}
-		contents, err := os.ReadFile(outputPath)
-		if err != nil {
-			return nil, err
-		}
-		applications, skipped := ParseBrewfile(string(contents))
-		if len(skipped) > 0 {
-			return applications, fmt.Errorf("Brewfile contains unsupported entries: %d", len(skipped))
-		}
-		return applications, nil
-	case "linux":
-		managers := []struct {
-			name string
-			args []string
-		}{
-			{"flatpak", []string{"list", "--app", "--columns=application"}},
-			{"snap", []string{"list"}},
-			{"apt", []string{"list", "--installed"}},
-			{"dnf", []string{"list", "installed", "-q"}},
-			{"pacman", []string{"-Qq"}},
-			{"zypper", []string{"--no-refresh", "se", "--installed-only", "-t", "package"}},
-			{"apk", []string{"info"}},
-		}
-		for _, manager := range managers {
-			if _, err := exec.LookPath(manager.name); err != nil {
-				continue
-			}
-			output, err := runner.Run(ctx, manager.name, manager.args...)
-			if err == nil {
-				return ParseLinuxPackages(manager.name, string(output)), nil
-			}
-		}
-		return nil, errors.New("no supported Linux package manager is available")
-	default:
-		return nil, fmt.Errorf("unsupported source platform %s", runtime.GOOS)
 	}
+	if goosFunc() == "darwin" {
+		if _, err := platformLookPath("brew"); err == nil {
+			return inventoryDarwinApplications(ctx, runner, tempDir)
+		}
+	}
+	for _, manager := range nativeLinuxManagers {
+		if _, err := platformLookPath(manager); err == nil {
+			return inventoryLinuxApplications(ctx, runner)
+		}
+	}
+	return nil, errors.New("no supported application inventory tool is available")
+}
+
+// inventoryWindowsApplications reads the winget export the runner produced.
+func inventoryWindowsApplications(ctx context.Context, runner CommandRunner, tempDir string) ([]Application, error) {
+	if runner == nil {
+		runner = systemCommandRunner{}
+	}
+	if _, err := platformLookPath("winget"); err != nil {
+		return nil, fmt.Errorf("winget is unavailable: %w", err)
+	}
+	outputPath := filepath.Join(tempDir, "winget-export.json")
+	defer os.Remove(outputPath)
+	if _, err := runner.Run(ctx, "winget", "export", "--output", outputPath, "--accept-source-agreements", "--disable-interactivity"); err != nil {
+		return nil, err
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("read winget export: %w", err)
+	}
+	return parseWingetExport(contents)
+}
+
+// inventoryDarwinApplications dumps the Homebrew bundle list into the
+// inventory workspace and parses it; Brewfile entries skip unsupported lines
+// without discarding the rest.
+func inventoryDarwinApplications(ctx context.Context, runner CommandRunner, tempDir string) ([]Application, error) {
+	if runner == nil {
+		runner = systemCommandRunner{}
+	}
+	if _, err := platformLookPath("brew"); err != nil {
+		return nil, fmt.Errorf("brew is unavailable: %w", err)
+	}
+	outputPath := filepath.Join(tempDir, "Brewfile")
+	if _, err := runner.Run(ctx, "brew", "bundle", "dump", "--file", outputPath, "--force"); err != nil {
+		return nil, err
+	}
+	contents, err := os.ReadFile(outputPath)
+	if err != nil {
+		return nil, err
+	}
+	applications, skipped := ParseBrewfile(string(contents))
+	if len(skipped) > 0 {
+		return applications, fmt.Errorf("Brewfile contains unsupported entries: %d", len(skipped))
+	}
+	return applications, nil
+}
+
+// inventoryLinuxApplications walks the native manager list in preference
+// order; a manager that answers with an empty listing is skipped like a
+// failing one so the next candidate still gets a chance.
+func inventoryLinuxApplications(ctx context.Context, runner CommandRunner) ([]Application, error) {
+	if runner == nil {
+		runner = systemCommandRunner{}
+	}
+	managers := []struct {
+		name string
+		args []string
+	}{
+		{"flatpak", []string{"list", "--app", "--columns=application"}},
+		{"snap", []string{"list"}},
+		{"apt", []string{"list", "--installed"}},
+		{"dnf", []string{"list", "installed", "-q"}},
+		{"pacman", []string{"-Qq"}},
+		{"zypper", []string{"--no-refresh", "se", "--installed-only", "-t", "package"}},
+		{"apk", []string{"info"}},
+	}
+	for _, manager := range managers {
+		if _, err := platformLookPath(manager.name); err != nil {
+			continue
+		}
+		output, err := runner.Run(ctx, manager.name, manager.args...)
+		if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+			return ParseLinuxPackages(manager.name, string(output)), nil
+		}
+	}
+	return nil, errors.New("no supported Linux package manager is available")
 }
 
 func parseWingetExport(contents []byte) ([]Application, error) {
@@ -295,10 +382,10 @@ func planApplicationInstall(applications []Application) ([]Application, []string
 }
 
 func installWindowsApplications(ctx context.Context, runner CommandRunner, applications []Application, manifestPath string) error {
-	if runtime.GOOS != "windows" {
+	if goosFunc() != "windows" {
 		return errors.New("Windows application installation requires a Windows destination")
 	}
-	if _, err := exec.LookPath("winget"); err != nil {
+	if _, err := platformLookPath("winget"); err != nil {
 		return fmt.Errorf("winget is unavailable: %w", err)
 	}
 	installable, skipped := planApplicationInstall(applications)

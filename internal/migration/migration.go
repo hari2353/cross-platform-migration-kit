@@ -28,6 +28,11 @@ const (
 	formatVersion = "migration-kit-v1"
 	objectDir     = "objects"
 	chunkSize     = 4 * 1024 * 1024
+	// maxWireChunk is the largest valid chunk payload on the wire: one
+	// plaintext chunk block plus the GCM tag. writeChunk takes ciphertext
+	// already sized by this; readChunk (decoders) recomputes the same bound
+	// from chunkSize so the two sides can never drift apart silently.
+	maxWireChunk = chunkSize + 28
 )
 
 type Item struct {
@@ -53,6 +58,7 @@ type Manifest struct {
 	Exclusions   []Exclusion   `json:"exclusions"`
 	Applications []Application `json:"applications,omitempty"`
 	Settings     []Setting     `json:"settings,omitempty"`
+	Checklist    []string      `json:"checklist,omitempty"`
 }
 
 type CopyPlan struct {
@@ -90,7 +96,7 @@ func DryRunRestore(repository, destination, key, profile string, overwrite bool)
 	for _, plan := range plans {
 		report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: plan.Action})
 	}
-	for _, plan := range PlanApplications(manifest.SourceOS, runtime.GOOS, manifest.Applications) {
+	for _, plan := range PlanApplications(manifest.SourceOS, goosFunc(), manifest.Applications) {
 		report.Add(Result{Kind: "application", ID: plan.Source.Identifier, Status: plan.Status, Detail: plan.Reason})
 	}
 	report.Finish()
@@ -152,45 +158,56 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 		}
 		if plan.Action == "skip-existing" && !overwrite {
 			state.Items[plan.Item.ID] = ItemState{Status: "skipped-existing"}
+			if stateErr := SaveRestoreState(repository, key, state); stateErr != nil {
+				return report, stateErr
+			}
 			report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "skipped-existing"})
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(plan.Target), 0o700); err != nil {
-			state.Items[plan.Item.ID] = ItemState{Status: "failed", Error: err.Error()}
+		failItem := func(statusErr error) (Report, error) {
+			state.Items[plan.Item.ID] = ItemState{Status: "failed", Error: statusErr.Error()}
 			_ = SaveRestoreState(repository, key, state)
-			return report, err
+			report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "failed", Detail: statusErr.Error()})
+			return report, statusErr
+		}
+		if err := osMkdirAll(filepath.Dir(plan.Target), 0o700); err != nil {
+			return failItem(fmt.Errorf("create destination directory: %w", err))
 		}
 		objectPath := filepath.Join(repository, objectDir, plan.Item.ID+".bin")
 		if err := decryptFile(objectPath, plan.Target, key, plan.Item.ID, plan.Item.SHA256, plan.Item.Size); err != nil {
-			state.Items[plan.Item.ID] = ItemState{Status: "failed", Error: err.Error()}
-			_ = SaveRestoreState(repository, key, state)
-			report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "failed", Detail: err.Error()})
-			return report, err
+			return failItem(fmt.Errorf("restore %s: %w", plan.Item.RelativePath, err))
 		}
-		state.Items[plan.Item.ID] = ItemState{Status: "copied"}
-		if err := SaveRestoreState(repository, key, state); err != nil {
-			return report, err
+		if err := osChmod(plan.Target, fs.FileMode(plan.Item.Mode)); err != nil {
+			return failItem(fmt.Errorf("restore permissions %s: %w", plan.Item.RelativePath, err))
 		}
 		report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "copied"})
+		state.Items[plan.Item.ID] = ItemState{Status: "copied"}
+		if stateErr := SaveRestoreState(repository, key, state); stateErr != nil {
+			return report, stateErr
+		}
 	}
 	if installApplications && len(manifest.Applications) > 0 {
-		plans := PlanApplications(manifest.SourceOS, runtime.GOOS, manifest.Applications)
+		plans := PlanApplications(manifest.SourceOS, goosFunc(), manifest.Applications)
 		var installable []Application
 		for _, appPlan := range plans {
 			if appPlan.Status == "unsupported" {
 				report.Add(Result{Kind: "application", ID: appPlan.Source.Identifier, Status: "unsupported", Detail: appPlan.Reason})
 				continue
 			}
+			if _, ok := applicationCommand(appPlan.Target); !ok {
+				report.Add(Result{Kind: "application", ID: appPlan.Source.Identifier, Status: "unsupported", Detail: "unknown package manager " + appPlan.Target.Manager})
+				continue
+			}
 			installable = append(installable, appPlan.Target)
 			report.Add(Result{Kind: "application", ID: appPlan.Source.Identifier, Status: "planned", Detail: appPlan.Target.Manager + ":" + appPlan.Target.Identifier})
 		}
 		if len(installable) > 0 {
-			tempDir, tempErr := os.MkdirTemp("", "migration-kit-apps-")
+			tempDir, tempErr := osMkdirTemp("", "migration-kit-apps-")
 			if tempErr != nil {
 				return report, tempErr
 			}
-			installErr := error(nil)
-			if runtime.GOOS == "windows" && allManager(installable, "winget") {
+			var installErr error
+			if goosFunc() == "windows" && allManager(installable, "winget") {
 				installErr = installWindowsApplications(context.Background(), systemCommandRunner{}, installable, filepath.Join(tempDir, "winget-import.json"))
 			} else {
 				for _, application := range installable {
@@ -212,24 +229,8 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 			}
 		}
 	}
-	for _, setting := range manifest.Settings {
-		if setting.Recipe != "git-v1" {
-			report.Add(Result{Kind: "setting", ID: setting.Recipe, Status: "unsupported"})
-			continue
-		}
-		content, renderErr := RenderGitSetting(setting)
-		if renderErr != nil {
-			return report, renderErr
-		}
-		path := filepath.Join(destination, ".gitconfig")
-		if _, statErr := os.Stat(path); statErr == nil && !overwrite {
-			report.Add(Result{Kind: "setting", ID: setting.Recipe, Path: path, Status: "skipped-existing"})
-			continue
-		}
-		if writeErr := os.WriteFile(path, content, 0o600); writeErr != nil {
-			return report, writeErr
-		}
-		report.Add(Result{Kind: "setting", ID: setting.Recipe, Path: path, Status: "restored"})
+	if err := restoreSettings(manifest, destination, &report, overwrite, false, systemCommandRunner{}); err != nil {
+		return report, err
 	}
 	report.Finish()
 	return report, nil
@@ -271,18 +272,18 @@ func ReadKey(path string) ([]byte, error) {
 }
 
 func Capture(sourceRoot, repository string, key []byte) (Manifest, error) {
-	return CaptureWithOptions(sourceRoot, repository, key, false, systemCommandRunner{})
+	return CaptureWithOptions(sourceRoot, repository, key, false, false, systemCommandRunner{})
 }
 
-func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplications bool, runner CommandRunner) (Manifest, error) {
+func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplications, credentials bool, runner CommandRunner) (Manifest, error) {
 	if len(key) != KeySize {
 		return Manifest{}, errors.New("key must be exactly 32 bytes")
 	}
-	sourceRoot, err := filepath.Abs(sourceRoot)
+	sourceRoot, err := absPath(sourceRoot)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("resolve source: %w", err)
 	}
-	repository, err = filepath.Abs(repository)
+	repository, err = absPath(repository)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("resolve repository: %w", err)
 	}
@@ -295,7 +296,7 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 	if err := os.WriteFile(filepath.Join(repository, formatFile), []byte(formatVersion), 0o600); err != nil {
 		return Manifest{}, fmt.Errorf("write repository format: %w", err)
 	}
-	items, exclusions, err := inventory(sourceRoot, repository)
+	items, exclusions, err := inventoryWithOptions(sourceRoot, repository, includeApplications)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -304,28 +305,74 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 		if runner == nil {
 			runner = systemCommandRunner{}
 		}
-		tempDir, err := os.MkdirTemp("", "migration-kit-apps-")
+		tempDir, err := osMkdirTemp("", "migration-kit-apps-")
 		if err != nil {
 			return Manifest{}, fmt.Errorf("create application inventory workspace: %w", err)
 		}
 		defer os.RemoveAll(tempDir)
-		applications, err = inventoryApplications(context.Background(), runner, tempDir)
-		if err != nil {
-			exclusions = append(exclusions, Exclusion{RelativePath: "applications", Reason: "application inventory unavailable: " + err.Error()})
-			applications = nil
+		var inventoryErr error
+		applications, inventoryErr = inventoryApplications(context.Background(), runner, tempDir)
+		if inventoryErr != nil {
+			// A platform tool that answered partially still leaves valid
+			// intents; record why the inventory is incomplete and keep
+			// the survivors.
+			exclusions = append(exclusions, Exclusion{RelativePath: "applications", Reason: "inventory incomplete: " + inventoryErr.Error()})
 		}
 	}
 	settings := []Setting{}
+	var checklist []string
 	if setting, settingErr := CaptureGitSetting(sourceRoot); settingErr == nil && len(setting.Values) > 0 {
 		settings = append(settings, setting)
+	} else if settingErr != nil {
+		exclusions = append(exclusions, Exclusion{RelativePath: "git", Reason: "setting capture unavailable: " + settingErr.Error()})
 	}
-	for index := range items {
-		path := filepath.Join(sourceRoot, filepath.FromSlash(items[index].RelativePath))
-		objectPath := filepath.Join(repository, objectDir, items[index].ID+".bin")
-		if err := encryptFile(path, objectPath, key, items[index].ID); err != nil {
-			return Manifest{}, fmt.Errorf("encrypt %s: %w", items[index].RelativePath, err)
+	if setting, sshErr := CaptureSSHConfig(sourceRoot); sshErr == nil && len(setting.Values) > 0 {
+		settings = append(settings, setting)
+	} else if sshErr != nil {
+		exclusions = append(exclusions, Exclusion{RelativePath: "ssh", Reason: "setting capture unavailable: " + sshErr.Error()})
+	}
+	if setting, chromeChecklist, chromeErr := captureChromeSetting(sourceRoot); chromeErr == nil && len(setting.Values) > 0 {
+		settings = append(settings, setting)
+		checklist = append(checklist, chromeChecklist...)
+	} else if chromeErr != nil {
+		exclusions = append(exclusions, Exclusion{RelativePath: "chrome", Reason: "setting capture unavailable: " + chromeErr.Error()})
+	}
+	if setting, authChecklist, openCodeErr := captureOpenCodeSetting(sourceRoot, credentials); openCodeErr == nil && len(setting.Values) > 0 {
+		settings = append(settings, setting)
+		checklist = append(checklist, authChecklist...)
+	} else if openCodeErr != nil {
+		exclusions = append(exclusions, Exclusion{RelativePath: "opencode", Reason: "setting capture unavailable: " + openCodeErr.Error()})
+	}
+	if setting, vscodeErr := captureVSCodeSetting(context.Background(), runner); vscodeErr == nil && len(setting.Values) > 0 {
+		settings = append(settings, setting)
+	} else if vscodeErr != nil {
+		exclusions = append(exclusions, Exclusion{RelativePath: "vscode", Reason: "setting capture unavailable: " + vscodeErr.Error()})
+	}
+	// The dev-file catalog travels as scrubbed recipes, never as raw files;
+	// the walk above already excluded every catalog path.
+	if devSettings, devChecklist, devErr := captureDevSettings(sourceRoot); devErr == nil {
+		settings = append(settings, devSettings...)
+		checklist = append(checklist, devChecklist...)
+	} else {
+		exclusions = append(exclusions, Exclusion{RelativePath: "devenv", Reason: "setting capture unavailable: " + devErr.Error()})
+	}
+	kept := items[:0]
+	for _, item := range items {
+		path := filepath.Join(sourceRoot, filepath.FromSlash(item.RelativePath))
+		objectPath := filepath.Join(repository, objectDir, item.ID+".bin")
+		if err := encryptObjectFunc(path, objectPath, key, item.ID); err != nil {
+			if isVanishedSource(err) {
+				// A file deleted between walk and encryption is a
+				// recorded skip, never a failed capture.
+				exclusions = append(exclusions, Exclusion{RelativePath: item.RelativePath, Reason: "vanished during capture: " + err.Error()})
+				continue
+			}
+			return Manifest{}, fmt.Errorf("encrypt %s: %w", item.RelativePath, err)
 		}
+		kept = append(kept, item)
 	}
+	items = kept
+	sort.Slice(items, func(i, j int) bool { return items[i].RelativePath < items[j].RelativePath })
 	manifest := Manifest{
 		Version:      1,
 		CreatedAt:    time.Now().UTC(),
@@ -335,6 +382,7 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 		Exclusions:   exclusions,
 		Applications: applications,
 		Settings:     settings,
+		Checklist:    checklist,
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -404,7 +452,7 @@ func isHex(value string) bool {
 }
 
 func PlanRestore(manifest Manifest, destination string, overwrite bool) ([]CopyPlan, error) {
-	destination, err := filepath.Abs(destination)
+	destination, err := absPath(destination)
 	if err != nil {
 		return nil, fmt.Errorf("resolve destination: %w", err)
 	}
@@ -445,17 +493,17 @@ func RestoreWithOptions(repository, destination string, key []byte, overwrite, d
 		return nil
 	}
 	for _, plan := range plans {
-		if plan.Action == "skip-existing" {
+		if plan.Action == "skip-existing" && !overwrite {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(plan.Target), 0o700); err != nil {
+		if err := osMkdirAll(filepath.Dir(plan.Target), 0o700); err != nil {
 			return fmt.Errorf("create destination directory: %w", err)
 		}
 		objectPath := filepath.Join(repository, objectDir, plan.Item.ID+".bin")
 		if err := decryptFile(objectPath, plan.Target, key, plan.Item.ID, plan.Item.SHA256, plan.Item.Size); err != nil {
 			return fmt.Errorf("restore %s: %w", plan.Item.RelativePath, err)
 		}
-		if err := os.Chmod(plan.Target, fs.FileMode(plan.Item.Mode)); err != nil {
+		if err := osChmod(plan.Target, fs.FileMode(plan.Item.Mode)); err != nil {
 			return fmt.Errorf("restore permissions %s: %w", plan.Item.RelativePath, err)
 		}
 	}
@@ -463,7 +511,7 @@ func RestoreWithOptions(repository, destination string, key []byte, overwrite, d
 		if runner == nil {
 			runner = systemCommandRunner{}
 		}
-		tempDir, err := os.MkdirTemp("", "migration-kit-apps-")
+		tempDir, err := osMkdirTemp("", "migration-kit-apps-")
 		if err != nil {
 			return fmt.Errorf("create application install workspace: %w", err)
 		}
@@ -523,76 +571,7 @@ func Verify(repository string, key []byte) error {
 }
 
 func inventory(sourceRoot, repository string) ([]Item, []Exclusion, error) {
-	var items []Item
-	var exclusions []Exclusion
-	err := filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			relative, _ := filepath.Rel(sourceRoot, path)
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: "unreadable"})
-			return nil
-		}
-		if path == sourceRoot {
-			return nil
-		}
-		relative, err := filepath.Rel(sourceRoot, path)
-		if err != nil {
-			return err
-		}
-		if isWithin(path, repository) || isCredentialLike(relative) || filepath.Base(relative) == ".gitconfig" {
-			reason := "repository"
-			if isCredentialLike(relative) {
-				reason = "credential-like path"
-			} else if filepath.Base(relative) == ".gitconfig" {
-				reason = "handled by Git settings recipe"
-			}
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: reason})
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: "symbolic link"})
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: "unreadable"})
-			return nil
-		}
-		if !info.Mode().IsRegular() {
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: "unsupported file type"})
-			return nil
-		}
-		checksum, err := fileSHA256(path)
-		if err != nil {
-			exclusions = append(exclusions, Exclusion{RelativePath: relative, Reason: "unreadable"})
-			return nil
-		}
-		idInput := relative + "\x00" + checksum
-		idSum := sha256.Sum256([]byte(idInput))
-		items = append(items, Item{
-			ID:           hex.EncodeToString(idSum[:]),
-			RelativePath: filepath.ToSlash(relative),
-			Size:         info.Size(),
-			Mode:         uint32(info.Mode().Perm()),
-			ModTimeUnix:  info.ModTime().UnixNano(),
-			SHA256:       checksum,
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("walk source: %w", err)
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].RelativePath < items[j].RelativePath })
-	sort.Slice(exclusions, func(i, j int) bool { return exclusions[i].RelativePath < exclusions[j].RelativePath })
-	return items, exclusions, nil
+	return inventoryWithOptions(sourceRoot, repository, false)
 }
 
 func encryptBytes(key, plaintext, aad []byte) ([]byte, error) {
@@ -641,7 +620,9 @@ func encryptFile(source, target string, key []byte, objectID string) error {
 		return err
 	}
 	defer output.Close()
-	if _, err := output.Write([]byte("MKF1")); err != nil {
+	// Magic header and chunk payloads go through the file-write seams so
+	// fault-injection tests can model a dying drive mid-write.
+	if _, err := fileWrite(output, []byte("MKF1")); err != nil {
 		return err
 	}
 	buffer := make([]byte, chunkSize)
@@ -656,7 +637,7 @@ func encryptFile(source, target string, key []byte, objectID string) error {
 			if err != nil {
 				return err
 			}
-			if err := writeChunk(output, ciphertext); err != nil {
+			if err := writeObjectChunk(output, ciphertext); err != nil {
 				return err
 			}
 			index++
@@ -668,59 +649,98 @@ func encryptFile(source, target string, key []byte, objectID string) error {
 	return nil
 }
 
+// reuseOrEncryptFile re-encrypts a missing or corrupt object once; a valid old
+// object is left in place so incremental captures stay cheap.
+var encryptObjectFunc = encryptFile
+
+func reuseOrEncryptFile(source, objectPath string, key []byte, item Item) error {
+	if info, statErr := os.Stat(objectPath); statErr == nil && info.Mode().IsRegular() {
+		if hash, size, verifyErr := verifyFile(objectPath, key, item.ID); verifyErr == nil &&
+			hash == item.SHA256 && size == item.Size {
+			return nil
+		}
+	} else if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return statErr
+	}
+	if err := removePath(objectPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return encryptTempThenRename(source, objectPath, key, item.ID)
+}
+
+// encryptTempThenRename is the crash-safe object write: stage in a temp file,
+// close, publish by rename, and clear the staging slot afterwards.
+func encryptTempThenRename(source, target string, key []byte, objectID string) error {
+	temp, err := osCreateTemp(filepath.Dir(target), ".migration-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporary := temp.Name()
+	// encryptObjectFunc creates its target with O_EXCL, so the staging
+	// slot claimed above must be vacated first.
+	if err := fileClose(temp); err != nil {
+		_ = removePath(temporary)
+		return err
+	}
+	if err := removePath(temporary); err != nil {
+		return err
+	}
+	if err := encryptObjectFunc(source, temporary, key, objectID); err != nil {
+		_ = removePath(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, target); err != nil {
+		_ = removePath(temporary)
+		return err
+	}
+	// The staging slot is obsolete once renamed; only non-ENOENT failures
+	// on platforms that delay rename unlinks are worth surfacing.
+	if err := removePath(temporary); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func decryptFile(source, target string, key []byte, objectID, expectedHash string, expectedSize int64) error {
 	input, err := os.Open(source)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
-	output, err := os.CreateTemp(filepath.Dir(target), ".migration-*.tmp")
+	temp, err := osCreateTemp(filepath.Dir(target), ".migration-*.tmp")
 	if err != nil {
 		return err
 	}
-	temporary := output.Name()
-	defer os.Remove(temporary)
-	defer output.Close()
-	magic := make([]byte, 4)
-	if _, err := io.ReadFull(input, magic); err != nil {
+	temporary := temp.Name()
+	discard := func() {
+		_ = fileClose(temp)
+		_ = removePath(temporary)
+	}
+	hash, size, decodeErr := decodeObjectStream(input, temp, key, objectID)
+	if decodeErr != nil {
+		discard()
+		return decodeErr
+	}
+	if hash != expectedHash || size != expectedSize {
+		discard()
+		return errors.New("decrypted file does not match manifest")
+	}
+	if err := fileSync(temp); err != nil {
+		discard()
 		return err
 	}
-	if string(magic) != "MKF1" {
-		return errors.New("invalid encrypted file format")
+	if err := fileClose(temp); err != nil {
+		discard()
+		return err
 	}
-	for index := uint64(0); ; index++ {
-		ciphertext, err := readChunk(input)
-		if errors.Is(err, io.EOF) {
-			if err := output.Sync(); err != nil {
-				return err
-			}
-			if err := output.Close(); err != nil {
-				return err
-			}
-			actualHash, err := fileSHA256(temporary)
-			if err != nil {
-				return err
-			}
-			info, err := os.Stat(temporary)
-			if err != nil {
-				return err
-			}
-			if actualHash != expectedHash || info.Size() != expectedSize {
-				return errors.New("decrypted file does not match manifest")
-			}
-			return os.Rename(temporary, target)
-		}
-		if err != nil {
-			return err
-		}
-		plaintext, err := decryptBytes(key, ciphertext, chunkAAD(objectID, index))
-		if err != nil {
-			return err
-		}
-		if _, err := output.Write(plaintext); err != nil {
-			return err
-		}
+	if err := os.Rename(temporary, target); err != nil {
+		discard()
+		return err
 	}
+	if err := removePath(temporary); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func verifyFile(source string, key []byte, objectID string) (string, int64, error) {
@@ -729,6 +749,12 @@ func verifyFile(source string, key []byte, objectID string) (string, int64, erro
 		return "", 0, err
 	}
 	defer input.Close()
+	return decodeObjectStream(input, io.Discard, key, objectID)
+}
+
+// decodeObjectStream verifies and decodes an MKF1 object stream in one pass:
+// hashes the plaintext, streams it to output, and returns (sha256, size).
+func decodeObjectStream(input io.Reader, output io.Writer, key []byte, objectID string) (string, int64, error) {
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(input, magic); err != nil {
 		return "", 0, err
@@ -750,16 +776,18 @@ func verifyFile(source string, key []byte, objectID string) (string, int64, erro
 		if err != nil {
 			return "", 0, err
 		}
-		written, err := hasher.Write(plaintext)
-		if err != nil {
+		if _, err := output.Write(plaintext); err != nil {
 			return "", 0, err
 		}
-		size += int64(written)
+		if _, err := hasher.Write(plaintext); err != nil {
+			return "", 0, err
+		}
+		size += int64(len(plaintext))
 	}
 }
 
 func writeChunk(output io.Writer, payload []byte) error {
-	if len(payload) > int(^uint32(0)) {
+	if len(payload) > maxWireChunk {
 		return errors.New("encrypted chunk is too large")
 	}
 	var size [4]byte
@@ -777,7 +805,7 @@ func readChunk(input io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	length := binary.BigEndian.Uint32(size[:])
-	if length < 12+16 || length > chunkSize+12+16 {
+	if length < 12+16 || length > maxWireChunk {
 		return nil, errors.New("invalid encrypted chunk size")
 	}
 	payload := make([]byte, length)
@@ -805,10 +833,20 @@ func fileSHA256(path string) (string, error) {
 func isCredentialLike(path string) bool {
 	clean := strings.ToLower(filepath.ToSlash(path))
 	parts := strings.Split(clean, "/")
-	for _, part := range parts {
+	for index, part := range parts {
 		switch part {
-		case ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", "keychain", "login data", "cookies":
+		case ".ssh", ".gnupg", ".aws", ".azure", "keychain", "login data", "cookies":
 			return true
+		case ".config":
+			// The gcloud and opencode directories are judged as a pair
+			// with the file underneath them.
+			if index+1 < len(parts) && parts[index+1] == "gcloud" {
+				return true
+			}
+		case "opencode":
+			if index+1 < len(parts) && strings.HasPrefix(parts[index+1], "auth") {
+				return true
+			}
 		}
 	}
 	base := strings.ToLower(filepath.Base(clean))
@@ -816,15 +854,14 @@ func isCredentialLike(path string) bool {
 }
 
 func rejectSymlinkedParents(target, root string) error {
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	target, err = filepath.Abs(target)
-	if err != nil {
-		return err
-	}
 	current := target
+	root, err := absPath(root)
+	if err != nil {
+		return err
+	}
+	if current, err = absPath(current); err != nil {
+		return err
+	}
 	for {
 		info, statErr := os.Lstat(current)
 		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -845,11 +882,11 @@ func rejectSymlinkedParents(target, root string) error {
 }
 
 func isWithin(candidate, root string) bool {
-	candidate, err := filepath.Abs(candidate)
+	candidate, err := absPath(candidate)
 	if err != nil {
 		return false
 	}
-	root, err = filepath.Abs(root)
+	root, err = absPath(root)
 	if err != nil {
 		return false
 	}

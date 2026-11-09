@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"encoding/json"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -31,8 +32,11 @@ type fileSpec struct {
 	// platform; capture and restore both skip it there.
 	Paths map[string]string
 	// Scrub sanitizes raw file bytes: content, excluded items, dropped flag.
-	// nil means carried verbatim.
+	// nil means carried as-is.
 	Scrub func(raw []byte) ([]byte, []string, bool)
+	// JSONFormat marks specs whose content must parse as JSON to travel;
+	// an unparsable file is skipped at capture instead of guessed at.
+	JSONFormat bool
 	// Mode is the destination file mode (0o644 when zero).
 	Mode os.FileMode
 	// ChecklistWhenScrubbed is emitted at capture only when this file's
@@ -72,15 +76,16 @@ func scrubLines(raw []byte) ([]byte, []string, bool) {
 // credential by shape (token shapes, URLs with userinfo) or by name
 // (token/password/secret/auth-style assignments).
 func lineDropsCredential(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	// Comments and blanks carry no live secret regardless of their words.
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return false
+	}
 	if stringContainsCredentialShape(line) {
 		return true
 	}
 	if userInfoURIPattern.MatchString(line) {
 		return true
-	}
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-		return false
 	}
 	// Name-based guard: exports, assignments, and key/val pairs whose
 	// variable or key name matches the secret markers. Whole-word matching
@@ -191,7 +196,11 @@ func scrubKubeConfig(raw []byte) ([]byte, []string, bool) {
 		if hit {
 			continue
 		}
-		if lineDropsCredential(line) {
+		// The generic substring guard would flag "authority" inside
+		// certificate-authority-data, so kubeconfig lines are judged by
+		// whole-word key names, raw token prefixes, and URL userinfo only.
+		varname := strings.Trim(strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[0]), "\"'")
+		if containsCredentialPrefix(trimmed) || userInfoURIPattern.MatchString(line) || (varname != "" && isSecretVarName(varname)) {
 			if trimmed != "" {
 				excluded = append(excluded, trimmed[:min(60, len(trimmed))])
 			}
@@ -201,6 +210,18 @@ func scrubKubeConfig(raw []byte) ([]byte, []string, bool) {
 		kept = append(kept, line)
 	}
 	return []byte(strings.Join(kept, "\n")), excluded, dropped
+}
+
+// containsCredentialPrefix reports the raw token-prefix hits only — the
+// keyword-substring half of stringContainsCredentialShape is deliberately
+// excluded so benign words like "authority" never match.
+func containsCredentialPrefix(s string) bool {
+	for _, prefix := range []string{"sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-", "AKIA"} {
+		if strings.Contains(s, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func allPlatforms(path string) map[string]string {
@@ -220,10 +241,10 @@ var devFileCatalog = []fileSpec{
 	{Key: ".tmux.conf", Description: "tmux config", Paths: allPlatforms(".tmux.conf"), Scrub: scrubLines},
 	{Key: "wt-packaged", Description: "Windows Terminal settings (packaged)",
 		Paths: map[string]string{"windows": "AppData/Local/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"},
-		Scrub: scrubJSONGeneric},
+		Scrub: scrubJSONGeneric, JSONFormat: true},
 	{Key: "wt-unpackaged", Description: "Windows Terminal settings",
 		Paths: map[string]string{"windows": "AppData/Local/Microsoft/Windows Terminal/settings.json"},
-		Scrub: scrubJSONGeneric},
+		Scrub: scrubJSONGeneric, JSONFormat: true},
 	{Key: "ps-profile-win71", Description: "PowerShell 7 profile (Windows)",
 		Paths: map[string]string{"windows": "Documents/PowerShell/Microsoft.PowerShell_profile.ps1"},
 		Scrub: scrubLines},
@@ -286,14 +307,14 @@ var devFileCatalog = []fileSpec{
 
 	// --- Docker (recipe: docker-v1) ---
 	{Key: "docker-config", Description: "docker client config",
-		Paths: allPlatforms(".docker/config.json"), Scrub: scrubDockerConfig, Mode: 0o600,
+		Paths: allPlatforms(".docker/config.json"), Scrub: scrubDockerConfig, Mode: 0o600, JSONFormat: true,
 		ChecklistWhenScrubbed: "docker: registry logins removed from .docker/config.json — run 'docker login' on the new machine."},
 	{Key: "docker-desktop-win", Description: "Docker Desktop settings (Windows)",
 		Paths: map[string]string{"windows": "AppData/Roaming/Docker/settings.json"},
-		Scrub: scrubJSONGeneric},
+		Scrub: scrubJSONGeneric, JSONFormat: true},
 	{Key: "docker-desktop-mac", Description: "Docker Desktop settings (macOS)",
 		Paths: map[string]string{"darwin": "Library/Group Containers/group.com.docker/settings.json"},
-		Scrub: scrubJSONGeneric},
+		Scrub: scrubJSONGeneric, JSONFormat: true},
 
 	// --- Kubernetes (recipe: kubernetes-v1) ---
 	{Key: "kube-config", Description: "kubeconfig",
@@ -353,6 +374,10 @@ func captureDevSettings(home string) ([]Setting, []string, error) {
 				setting.Excluded = append(setting.Excluded, spec.Key+": unparsable file skipped")
 				continue
 			}
+		}
+		if spec.JSONFormat && !json.Valid(bytes.TrimSpace(content)) {
+			setting.Excluded = append(setting.Excluded, spec.Key+": unparsable file skipped")
+			continue
 		}
 		setting.Values[spec.Key] = string(content)
 		if len(excluded) > 0 {
@@ -418,4 +443,86 @@ func restoreCatalogSetting(setting Setting, destination string, report *Report, 
 		report.Add(Result{Kind: "setting", ID: setting.Recipe, Path: path, Status: "restored"})
 	}
 	return nil
+}
+
+// stringContainsCredentialShape reports whether a string looks like a credential
+// (token, password, secret, auth, or a known token prefix).
+func stringContainsCredentialShape(s string) bool {
+	lower := strings.ToLower(s)
+	for _, kw := range []string{"token", "password", "secret", "auth", "apikey", "api_key", "private_key"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-", "AKIA"} {
+		if strings.Contains(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubVSCodeSecrets removes credential-shaped keys and arrays from a VSCode
+// settings JSON document. Returns the scrubbed JSON and the list of excluded keys.
+func scrubVSCodeSecrets(raw []byte) ([]byte, []string) {
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return raw, nil
+	}
+	var excluded []string
+	scrubMap(doc, "", &excluded)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw, excluded
+	}
+	return out, excluded
+}
+
+func scrubMap(m map[string]interface{}, prefix string, excluded *[]string) {
+	for key, val := range m {
+		fullKey := key
+		if prefix != "" {
+			fullKey = prefix + "." + key
+		}
+		// Drop keys whose name looks credential-shaped.
+		if stringContainsCredentialShape(key) {
+			delete(m, key)
+			*excluded = append(*excluded, fullKey)
+			continue
+		}
+		switch v := val.(type) {
+		case map[string]interface{}:
+			scrubMap(v, fullKey, excluded)
+		case []interface{}:
+			// Conservative: if any element is credential-shaped, drop the whole key.
+			poisoned := false
+			for _, elem := range v {
+				if s, ok := elem.(string); ok && stringContainsCredentialShape(s) {
+					poisoned = true
+					break
+				}
+				if m2, ok := elem.(map[string]interface{}); ok {
+					// check nested keys
+					for k := range m2 {
+						if stringContainsCredentialShape(k) {
+							poisoned = true
+							break
+						}
+					}
+				}
+				if poisoned {
+					break
+				}
+			}
+			if poisoned {
+				delete(m, key)
+				*excluded = append(*excluded, fullKey)
+			}
+		case string:
+			if stringContainsCredentialShape(v) {
+				delete(m, key)
+				*excluded = append(*excluded, fullKey)
+			}
+		}
+	}
 }
