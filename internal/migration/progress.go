@@ -21,10 +21,10 @@ func EstimateETA(done, total int64, elapsed time.Duration) (time.Duration, bool)
 // then a report passes only on a >=5% byte boundary or every 250 calls —
 // whichever comes first. A 100k-file tree yields ~20+400 lines, not 100k.
 type ProgressFilter struct {
-	started    bool
-	lastPrint  int64
-	lastCall   int
-	calls      int
+	started   bool
+	lastPrint int64
+	lastCall  int
+	calls     int
 }
 
 func NewProgressFilter() *ProgressFilter {

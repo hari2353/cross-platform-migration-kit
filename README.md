@@ -90,10 +90,24 @@ migrate pack --bundle E:\migration-repository --key-file E:\migration.key --bina
 # Check the final result:
 migrate verify --bundle E:\migration-repository --destination C:\Users\new-user --key-file E:\migration.key
 migrate doctor --bundle E:\migration-repository --destination C:\Users\new-user --key-file E:\migration.key
+
+# Changed your mind? Revert the restore (files only — apps and settings stay):
+migrate undo --bundle E:\migration-repository --destination C:\Users\new-user --key-file E:\migration.key
 ```
 
 The first usable release will expose the same commands through the standalone
 executable on all supported platforms.
+
+Capture and restore report byte progress with a running estimate (stderr, so
+reports stay pipeable), `inspect` and the human reports open with a
+plain-language will / won't-transfer summary and recommended next steps, and
+`migrate undo` reverts a restore to the destination's pre-restore state
+(encrypted pre-state journal in the repository; files only — applications and
+settings are not reverted, and the report says so).
+
+Because the source is classified from the tree's own shape — not the host
+doing the capture — `capture --source` accepts a drive mounted from another
+computer, including one that no longer boots.
 
 Current local smoke-test commands:
 

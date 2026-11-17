@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -236,5 +237,48 @@ func TestVerifyReportMentionsProblemsInHumanMode(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "checksum-mismatch") {
 		t.Fatalf("human report did not explain the failure: %s", output)
+	}
+}
+
+func TestUndoCommandDispatchesAndReverts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("path shapes in this test are unix-style")
+	}
+	source := t.TempDir()
+	repository := filepath.Join(t.TempDir(), "repository")
+	destination := t.TempDir()
+	keyPath := filepath.Join(t.TempDir(), "migration.key")
+	if err := run([]string{"keygen", "--output", keyPath}); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "one.txt"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"capture", "--source", source, "--output", repository,
+		"--key-file", keyPath}); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if err := run([]string{"restore", "--bundle", repository, "--destination", destination,
+		"--key-file", keyPath, "--profile", "personal", "--dry-run"}); err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if err := run([]string{"restore", "--bundle", repository, "--destination", destination,
+		"--key-file", keyPath, "--profile", "personal"}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "one.txt")); err != nil {
+		t.Fatalf("restore should create one.txt: %v", err)
+	}
+	// dispatch through run() — a missing args[1:] here empties every flag
+	if err := run([]string{"undo", "--bundle", repository, "--destination", destination,
+		"--key-file", keyPath}); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "one.txt")); !os.IsNotExist(err) {
+		t.Fatalf("undo must remove the restored file")
+	}
+	if err := run([]string{"undo", "--bundle", repository, "--destination", destination,
+		"--key-file", keyPath}); err == nil {
+		t.Fatalf("second undo must fail loudly")
 	}
 }

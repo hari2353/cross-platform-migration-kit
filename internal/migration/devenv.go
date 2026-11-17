@@ -1,9 +1,9 @@
 package migration
 
 import (
-	"encoding/json"
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"

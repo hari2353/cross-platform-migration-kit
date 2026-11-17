@@ -64,7 +64,9 @@ func RenderGitSetting(setting Setting, osArgs ...string) ([]byte, error) {
 		return nil, errors.New("unsupported Git recipe")
 	}
 	dstOS := ""
-	if len(osArgs) >= 2 { dstOS = osArgs[1] }
+	if len(osArgs) >= 2 {
+		dstOS = osArgs[1]
+	}
 	allowed := map[string]bool{"name": true, "email": true, "autocrlf": true, "alias.st": true, "defaultbranch": true}
 	for key := range setting.Values {
 		if !allowed[key] {

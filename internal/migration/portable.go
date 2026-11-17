@@ -1,12 +1,12 @@
 package migration
 
 import (
-	"os/exec"
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -27,15 +27,15 @@ import (
 // Test seams: package-level function variables so tests can inject failures.
 // Production defaults delegate to the real os/file methods.
 var (
-	osChmod        = os.Chmod
-	fileChmod      = func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) }
-	fileWrite      = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
-	fileSync       = func(f *os.File) error { return f.Sync() }
-	fileClose      = func(f *os.File) error { return f.Close() }
-	osCreateTemp   = os.CreateTemp
-	osMkdirTemp    = os.MkdirTemp
-	osMkdirAll    = os.MkdirAll
-	removePath     = os.Remove
+	osChmod      = os.Chmod
+	fileChmod    = func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) }
+	fileWrite    = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+	fileSync     = func(f *os.File) error { return f.Sync() }
+	fileClose    = func(f *os.File) error { return f.Close() }
+	osCreateTemp = os.CreateTemp
+	osMkdirTemp  = os.MkdirTemp
+	osMkdirAll   = os.MkdirAll
+	removePath   = os.Remove
 	// Chunks go onto the wire with the same 4-byte length header as
 	// writeChunk so decoders can frame the stream.
 	writeObjectChunk = writeChunk

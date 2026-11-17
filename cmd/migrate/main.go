@@ -46,7 +46,7 @@ func run(args []string) error {
 	case "pack":
 		return pack(args[1:])
 	case "undo":
-		return undo(args)
+		return undo(args[1:])
 	case "doctor":
 		return doctor(args[1:])
 	default:

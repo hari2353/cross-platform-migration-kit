@@ -84,6 +84,9 @@ func TestUndoRevertsRestoreToPreState(t *testing.T) {
 	if undoReport.Command != "undo" {
 		t.Fatalf("undo report command: %q", undoReport.Command)
 	}
+	if lines := SummarizeReport(undoReport); !strings.Contains(lines[0], "removed or reverted") {
+		t.Fatalf("undo summary must speak undo, not copy: %q", lines[0])
+	}
 	joined := strings.Join(summaryLines(undoReport), "\n")
 	if !strings.Contains(joined, "reverted") && !strings.Contains(joined, "removed") {
 		t.Fatalf("undo report must state what it did:\n%s", joined)

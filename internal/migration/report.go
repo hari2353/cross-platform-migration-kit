@@ -86,8 +86,14 @@ func SummarizeReport(report Report) []string {
 		}
 	}
 	copied := fileStatus["copied"]
-	lines := []string{fmt.Sprintf("%d of %d files copied",
-		copied, maxInt(report.Files, copied))}
+	firstLine := fmt.Sprintf("%d of %d files copied",
+		copied, maxInt(report.Files, copied))
+	if report.Command == "undo" {
+		// an undo report's action is removal/reversion, not copying
+		firstLine = fmt.Sprintf("%d file(s) removed or reverted",
+			report.Files)
+	}
+	lines := []string{firstLine}
 	skipped := 0
 	var skipReasons []string
 	for _, status := range []string{"skipped-existing", "skipped", "unsupported", "excluded"} {

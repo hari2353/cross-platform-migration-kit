@@ -18,11 +18,11 @@ func TestEstimateETATable(t *testing.T) {
 		want        time.Duration
 		ok          bool
 	}{
-		{0, 100, 10 * time.Second, 0, false},           // no rate yet
-		{100, 100, 10 * time.Second, 0, false},         // finished
+		{0, 100, 10 * time.Second, 0, false},   // no rate yet
+		{100, 100, 10 * time.Second, 0, false}, // finished
 		{50, 100, 10 * time.Second, 10 * time.Second, true},
 		{25, 100, 5 * time.Second, 15 * time.Second, true},
-		{1, 1, 0, 0, false},                            // no elapsed time
+		{1, 1, 0, 0, false}, // no elapsed time
 	}
 	for _, tc := range cases {
 		got, ok := EstimateETA(tc.done, tc.total, tc.elapsed)
