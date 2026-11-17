@@ -122,9 +122,11 @@ func SummarizeReport(report Report) []string {
 		}
 		lines = append(lines, "applications: "+strings.Join(bits, ", "))
 	}
-	// next steps, keyed off the actual state — conditions stack: a run can
-	// have failures AND untranslatable apps
-	if fileStatus["failed"] > 0 {
+	// next steps, keyed off the command and the actual state — conditions
+	// stack: a run can have failures AND untranslatable apps
+	if report.Command == "restore-dry-run" {
+		lines = append(lines, "next: review the plan above, then run migrate restore without --dry-run")
+	} else if fileStatus["failed"] > 0 {
 		lines = append(lines, "next: fix the failed items above, then run migrate resume")
 	}
 	if len(unsupportedApps) > 0 {
@@ -140,7 +142,11 @@ func SummarizeReport(report Report) []string {
 		}
 		lines = append(lines, line)
 	}
-	if fileStatus["failed"] == 0 && len(unsupportedApps) == 0 {
+	if report.Command == "undo" && fileStatus["failed"] == 0 {
+		// verify compares against the manifest the undo just unwound —
+		// doctor is the right post-undo check
+		lines = append(lines, "next: the destination is back to its pre-restore state — run migrate doctor to check it")
+	} else if report.Command != "restore-dry-run" && fileStatus["failed"] == 0 && len(unsupportedApps) == 0 {
 		lines = append(lines, "next: verify the destination with migrate verify")
 	}
 	return lines

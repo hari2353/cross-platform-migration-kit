@@ -41,6 +41,12 @@ platform tool:
 
 The kit combines these ideas behind one manifest and reports what could not be
 translated. It does not hide platform differences behind a false promise.
+
+The source is classified from the captured tree's own shape — so `capture
+--source` accepts a drive mounted from another computer, including one that no
+longer boots, and still reports that volume's platform. A bare tree with no
+platform markers (a plain data folder) is honestly reported as the capturing
+host's platform.
 See [research and prior art](docs/research.md) for the source register.
 
 ## Standalone and Open Source
@@ -105,9 +111,7 @@ plain-language will / won't-transfer summary and recommended next steps, and
 (encrypted pre-state journal in the repository; files only — applications and
 settings are not reverted, and the report says so).
 
-Because the source is classified from the tree's own shape — not the host
-doing the capture — `capture --source` accepts a drive mounted from another
-computer, including one that no longer boots.
+
 
 Current local smoke-test commands:
 

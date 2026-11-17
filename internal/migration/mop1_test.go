@@ -340,6 +340,17 @@ func TestManagedRestoreChmodAndStateFaults(t *testing.T) {
 	if _, err := DryRunRestore(repository, second, keyPath, "personal", false); err != nil {
 		t.Fatal(err)
 	}
+	// Seed this destination's undo journal with a fully successful pass
+	// first: the journal precedes the copy loop by design (its pre-state
+	// must exist before anything is written), so a global fileWrite fault
+	// would otherwise correctly abort AT the journal instead of exercising
+	// the state-write path this case targets.
+	if _, err := ManagedRestore(repository, second, keyPath, "personal", false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []string{"a.txt"} {
+		_ = os.Remove(filepath.Join(second, item))
+	}
 	seamOverride(t, &fileWrite, func(*os.File, []byte) (int, error) { return 0, errors.New("disk full") })
 	report, err := ManagedRestore(repository, second, keyPath, "personal", false, false)
 	if err == nil {

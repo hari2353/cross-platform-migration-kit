@@ -54,3 +54,22 @@ func TestCaptureFallsBackToHostOSForAmbiguousTrees(t *testing.T) {
 		t.Errorf("ambiguous tree classified as %q, want host %q", got, runtime.GOOS)
 	}
 }
+
+func TestCaptureClassifiesUsersRootVolumes(t *testing.T) {
+	// capture rooted AT the users directory (C:\Users, /Users, /home):
+	// platform markers sit one level down — john/AppData, john/Library —
+	// so detection must read path segments, not only root prefixes
+	cases := []struct {
+		marker, want string
+	}{
+		{"john/AppData/Roaming/marker.txt", "windows"},
+		{"john/Library/Application Support/marker.txt", "darwin"},
+		{"john/.config/git/config", "linux"},
+	}
+	for _, tc := range cases {
+		if got := captureSourceOS(t, tc.marker); got != tc.want {
+			t.Errorf("users-root tree with %s classified as %q, want %q",
+				tc.marker, got, tc.want)
+		}
+	}
+}

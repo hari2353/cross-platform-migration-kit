@@ -441,26 +441,33 @@ func CaptureWithProgress(sourceRoot, repository string, key []byte, includeAppli
 // layout, and the host doing the capture is the wrong answer (a Windows
 // drive captured on a Mac is still a Windows drive). runtime.GOOS is the
 // last resort for ambiguous bare trees (same-platform upgrades).
-var sourceOSMarkers = map[string][]string{
-	"windows": {"AppData/", "Program Files/", "ProgramData/", "NTUSER.DAT"},
-	"darwin":  {"Library/", "Movies/", "Public/"},
-	"linux":   {".config/", ".local/", ".cache/"},
+// Detection reads path SEGMENTS, not root prefixes: a volume captured at
+// its users directory (C:\Users, /Users, /home) carries the platform one
+// level down (john/AppData, john/Library, john/.config). "Public" is
+// deliberately absent — it exists on both Windows (C:\Users\Public) and
+// macOS (/Users/Public) and misclassifies in both directions.
+var sourceOSSegments = map[string][]string{
+	"windows": {"AppData", "NTUSER.DAT", "Program Files", "ProgramData"},
+	"darwin":  {"Library", "Application Support"},
+	"linux":   {".config", ".local", ".cache"},
 }
 
 func detectSourceOS(items []Item, exclusions []Exclusion) string {
-	paths := make([]string, 0, len(items)+len(exclusions))
+	segments := map[string]bool{}
 	for _, item := range items {
-		paths = append(paths, item.RelativePath)
+		for _, segment := range strings.Split(item.RelativePath, "/") {
+			segments[segment] = true
+		}
 	}
 	for _, exclusion := range exclusions {
-		paths = append(paths, exclusion.RelativePath)
+		for _, segment := range strings.Split(exclusion.RelativePath, "/") {
+			segments[segment] = true
+		}
 	}
 	for _, osName := range []string{"windows", "darwin", "linux"} {
-		for _, path := range paths {
-			for _, marker := range sourceOSMarkers[osName] {
-				if strings.HasPrefix(path, marker) {
-					return osName
-				}
+		for _, segment := range sourceOSSegments[osName] {
+			if segments[segment] {
+				return osName
 			}
 		}
 	}

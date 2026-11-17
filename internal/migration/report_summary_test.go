@@ -96,3 +96,26 @@ func TestWriteHumanReportLeadsWithSummary(t *testing.T) {
 		t.Errorf("existing header line must survive:\n%s", out)
 	}
 }
+
+func TestNextStepsMatchTheCommand(t *testing.T) {
+	dryRun := NewReport("restore-dry-run")
+	dryRun.Results = []Result{{Kind: "file", Status: "copied"}}
+	dryRunLines := strings.Join(SummarizeReport(dryRun), "\n")
+	if !strings.Contains(dryRunLines, "without --dry-run") {
+		t.Errorf("dry-run must point at the real restore:\n%s", dryRunLines)
+	}
+	if strings.Contains(dryRunLines, "migrate verify") {
+		t.Errorf("dry-run must not send the user to verify (nothing restored yet):\n%s", dryRunLines)
+	}
+
+	undo := NewReport("undo")
+	undo.Files = 1
+	undo.Results = []Result{{Kind: "file", Status: "removed"}}
+	undoLines := strings.Join(SummarizeReport(undo), "\n")
+	if strings.Contains(undoLines, "migrate verify") {
+		t.Errorf("undo must not point at verify (it compares against the manifest the undo removed):\n%s", undoLines)
+	}
+	if !strings.Contains(undoLines, "migrate doctor") {
+		t.Errorf("undo should suggest doctor:\n%s", undoLines)
+	}
+}
