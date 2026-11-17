@@ -414,7 +414,7 @@ func CaptureWithProgress(sourceRoot, repository string, key []byte, includeAppli
 	manifest := Manifest{
 		Version:      1,
 		CreatedAt:    time.Now().UTC(),
-		SourceOS:     runtime.GOOS,
+		SourceOS:     detectSourceOS(items, exclusions),
 		SourceRoot:   filepath.Base(sourceRoot),
 		Items:        items,
 		Exclusions:   exclusions,
@@ -434,6 +434,37 @@ func CaptureWithProgress(sourceRoot, repository string, key []byte, includeAppli
 		return Manifest{}, fmt.Errorf("write manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+// detectSourceOS classifies the captured tree by its own shape — a
+// mounted volume from a dead computer carries its platform in its
+// layout, and the host doing the capture is the wrong answer (a Windows
+// drive captured on a Mac is still a Windows drive). runtime.GOOS is the
+// last resort for ambiguous bare trees (same-platform upgrades).
+var sourceOSMarkers = map[string][]string{
+	"windows": {"AppData/", "Program Files/", "ProgramData/", "NTUSER.DAT"},
+	"darwin":  {"Library/", "Movies/", "Public/"},
+	"linux":   {".config/", ".local/", ".cache/"},
+}
+
+func detectSourceOS(items []Item, exclusions []Exclusion) string {
+	paths := make([]string, 0, len(items)+len(exclusions))
+	for _, item := range items {
+		paths = append(paths, item.RelativePath)
+	}
+	for _, exclusion := range exclusions {
+		paths = append(paths, exclusion.RelativePath)
+	}
+	for _, osName := range []string{"windows", "darwin", "linux"} {
+		for _, path := range paths {
+			for _, marker := range sourceOSMarkers[osName] {
+				if strings.HasPrefix(path, marker) {
+					return osName
+				}
+			}
+		}
+	}
+	return runtime.GOOS
 }
 
 func LoadManifest(repository string, key []byte) (Manifest, error) {
