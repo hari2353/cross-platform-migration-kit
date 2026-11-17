@@ -156,6 +156,9 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 	report.Destination = destination
 	report.Files = len(plans)
 	report.Applications = len(manifest.Applications)
+	if err := writeUndoJournal(repository, key, destination, plans); err != nil {
+		return Report{}, fmt.Errorf("record undo journal: %w", err)
+	}
 	var totalBytes int64
 	for _, plan := range plans {
 		totalBytes += plan.Item.Size

@@ -45,10 +45,12 @@ func run(args []string) error {
 		return resume(args[1:])
 	case "pack":
 		return pack(args[1:])
+	case "undo":
+		return undo(args)
 	case "doctor":
 		return doctor(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q: commands are keygen, capture, inspect, restore, resume, verify, pack, doctor", args[0])
+		return fmt.Errorf("unknown command %q: commands are keygen, capture, inspect, restore, resume, undo, verify, pack, doctor", args[0])
 	}
 }
 
@@ -295,6 +297,24 @@ func pack(args []string) error {
 	}
 	for _, name := range written {
 		fmt.Println("packed", name)
+	}
+	return nil
+}
+
+func undo(args []string) error {
+	flags := flag.NewFlagSet("undo", flag.ContinueOnError)
+	repository := flags.String("bundle", "", "encrypted repository directory")
+	keyPath := flags.String("key-file", "", "path to the separate 32-byte secret key")
+	destination := flags.String("destination", "", "destination root the restore used")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	report, err := migration.UndoRestore(*repository, *destination, *keyPath)
+	if err != nil {
+		return err
+	}
+	if err := migration.WriteHumanReport(os.Stdout, report); err != nil {
+		return err
 	}
 	return nil
 }
