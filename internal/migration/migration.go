@@ -104,14 +104,22 @@ func DryRunRestore(repository, destination, key, profile string, overwrite bool)
 }
 
 func ManagedRestore(repository, destination, key, profile string, overwrite, installApplications bool) (Report, error) {
+	return ManagedRestoreWithProgress(repository, destination, key, profile, overwrite, installApplications, nil)
+}
+
+func ManagedRestoreWithProgress(repository, destination, key, profile string, overwrite, installApplications bool, progress ProgressFunc) (Report, error) {
 	keyBytes, err := ReadKey(key)
 	if err != nil {
 		return Report{}, err
 	}
-	return managedRestoreWithKey(repository, destination, keyBytes, profile, overwrite, installApplications)
+	return managedRestoreWithKey(repository, destination, keyBytes, profile, overwrite, installApplications, progress)
 }
 
 func ResumeRestore(repository, key, profile string, installApplications bool) (Report, error) {
+	return ResumeRestoreWithProgress(repository, key, profile, installApplications, nil)
+}
+
+func ResumeRestoreWithProgress(repository, key, profile string, installApplications bool, progress ProgressFunc) (Report, error) {
 	keyBytes, err := ReadKey(key)
 	if err != nil {
 		return Report{}, err
@@ -120,10 +128,10 @@ func ResumeRestore(repository, key, profile string, installApplications bool) (R
 	if err != nil {
 		return Report{}, fmt.Errorf("load restore state: %w", err)
 	}
-	return managedRestoreWithKey(repository, state.Destination, keyBytes, profile, state.Overwrite, installApplications)
+	return managedRestoreWithKey(repository, state.Destination, keyBytes, profile, state.Overwrite, installApplications, progress)
 }
 
-func managedRestoreWithKey(repository, destination string, key []byte, profile string, overwrite, installApplications bool) (Report, error) {
+func managedRestoreWithKey(repository, destination string, key []byte, profile string, overwrite, installApplications bool, progress ProgressFunc) (Report, error) {
 	manifest, err := LoadManifest(repository, key)
 	if err != nil {
 		return Report{}, err
@@ -148,11 +156,23 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 	report.Destination = destination
 	report.Files = len(plans)
 	report.Applications = len(manifest.Applications)
+	var totalBytes int64
 	for _, plan := range plans {
+		totalBytes += plan.Item.Size
+	}
+	var doneBytes int64
+	for _, plan := range plans {
+		progressItem := func() {
+			doneBytes += plan.Item.Size
+			if progress != nil {
+				progress(doneBytes, totalBytes, plan.Item.RelativePath)
+			}
+		}
 		if current, ok := state.Items[plan.Item.ID]; ok && current.Status == "copied" {
 			actual, hashErr := fileSHA256(plan.Target)
 			if hashErr == nil && actual == plan.Item.SHA256 {
 				report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "already-complete"})
+				progressItem()
 				continue
 			}
 		}
@@ -162,6 +182,7 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 				return report, stateErr
 			}
 			report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "skipped-existing"})
+			progressItem()
 			continue
 		}
 		failItem := func(statusErr error) (Report, error) {
@@ -182,6 +203,7 @@ func managedRestoreWithKey(repository, destination string, key []byte, profile s
 		}
 		report.Add(Result{Kind: "file", ID: plan.Item.ID, Path: plan.Item.RelativePath, Status: "copied"})
 		state.Items[plan.Item.ID] = ItemState{Status: "copied"}
+		progressItem()
 		if stateErr := SaveRestoreState(repository, key, state); stateErr != nil {
 			return report, stateErr
 		}
@@ -276,6 +298,10 @@ func Capture(sourceRoot, repository string, key []byte) (Manifest, error) {
 }
 
 func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplications, credentials bool, runner CommandRunner) (Manifest, error) {
+	return CaptureWithProgress(sourceRoot, repository, key, includeApplications, credentials, runner, nil)
+}
+
+func CaptureWithProgress(sourceRoot, repository string, key []byte, includeApplications, credentials bool, runner CommandRunner, progress ProgressFunc) (Manifest, error) {
 	if len(key) != KeySize {
 		return Manifest{}, errors.New("key must be exactly 32 bytes")
 	}
@@ -356,6 +382,11 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 	} else {
 		exclusions = append(exclusions, Exclusion{RelativePath: "devenv", Reason: "setting capture unavailable: " + devErr.Error()})
 	}
+	var totalBytes int64
+	for _, item := range items {
+		totalBytes += item.Size
+	}
+	var doneBytes int64
 	kept := items[:0]
 	for _, item := range items {
 		path := filepath.Join(sourceRoot, filepath.FromSlash(item.RelativePath))
@@ -370,6 +401,10 @@ func CaptureWithOptions(sourceRoot, repository string, key []byte, includeApplic
 			return Manifest{}, fmt.Errorf("encrypt %s: %w", item.RelativePath, err)
 		}
 		kept = append(kept, item)
+		doneBytes += item.Size
+		if progress != nil {
+			progress(doneBytes, totalBytes, item.RelativePath)
+		}
 	}
 	items = kept
 	sort.Slice(items, func(i, j int) bool { return items[i].RelativePath < items[j].RelativePath })

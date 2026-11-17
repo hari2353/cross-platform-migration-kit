@@ -204,7 +204,7 @@ func TestCaptureWithOptionsAbsBranches(t *testing.T) {
 	source := t.TempDir()
 	// The source resolver fails first.
 	overrideAbsPath(t, failingAbsPath())
-	if _, err := CaptureWithOptions(source, t.TempDir(), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, t.TempDir(), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a failing source resolver")
 	}
 	// The repository resolver fails second: only repository paths fail.
@@ -214,7 +214,7 @@ func TestCaptureWithOptionsAbsBranches(t *testing.T) {
 		}
 		return filepath.Abs(path)
 	})
-	if _, err := CaptureWithOptions(source, filepath.Join(t.TempDir(), "repo"), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, filepath.Join(t.TempDir(), "repo"), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a failing repository resolver")
 	}
 }
@@ -1524,7 +1524,7 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	}
 
 	// Repository inside the source root is refused.
-	if _, err := CaptureWithOptions(source, filepath.Join(source, "repo"), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, filepath.Join(source, "repo"), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a repository inside the source root")
 	}
 	// The objects directory cannot be created when its parent is a file.
@@ -1532,7 +1532,7 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	if err := os.WriteFile(occupied, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CaptureWithOptions(source, filepath.Join(occupied, "repo"), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, filepath.Join(occupied, "repo"), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted an uncreatable repository")
 	}
 	// The format marker write fails when its path is a directory.
@@ -1549,16 +1549,16 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(withFormatDir, formatFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CaptureWithOptions(source, withFormatDir, key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, withFormatDir, key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a blocked format marker")
 	}
 	// A missing source root fails loudly instead of capturing nothing.
-	if _, err := CaptureWithOptions(filepath.Join(root, "missing"), t.TempDir(), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(filepath.Join(root, "missing"), t.TempDir(), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a missing source root")
 	}
 	// includeApplications with a failing workspace creation aborts.
 	seamOverride(t, &osMkdirTemp, func(string, string) (string, error) { return "", errors.New("no workspaces") })
-	if _, err := CaptureWithOptions(source, t.TempDir(), key, true, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, t.TempDir(), key, true, false, nil, nil); err == nil {
 		t.Fatal("capture surfaced the workspace failure")
 	}
 	seamOverride(t, &osMkdirTemp, os.MkdirTemp)
@@ -1568,7 +1568,7 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	t.Cleanup(windows)
 	emptyLookPath := overrideLookPath([]string{})
 	t.Cleanup(emptyLookPath)
-	manifest, err := CaptureWithOptions(source, t.TempDir(), key, true, false, nil)
+	manifest, err := CaptureWithProgress(source, t.TempDir(), key, true, false, nil, nil)
 	if err != nil || len(manifest.Applications) != 0 {
 		t.Fatalf("unavailable tooling must yield a clean capture: %#v %v", manifest.Applications, err)
 	}
@@ -1579,7 +1579,7 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	windows()
 	// The object-encrypt failure aborts capture.
 	seamOverride(t, &encryptObjectFunc, func(string, string, []byte, string) error { return errors.New("encrypt refused") })
-	if _, err := CaptureWithOptions(source, t.TempDir(), key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, t.TempDir(), key, false, false, nil, nil); err == nil {
 		t.Fatal("capture surfaced the object-encrypt failure")
 	}
 	// The final manifest write fails when its path is a directory.
@@ -1587,7 +1587,7 @@ func TestCaptureWithOptionsFaultLadder(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(manifestBlocked, manifestFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CaptureWithOptions(source, manifestBlocked, key, false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, manifestBlocked, key, false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a blocked manifest path")
 	}
 }
@@ -1608,7 +1608,7 @@ func TestCaptureSkipsSourceVanishedDuringCapture(t *testing.T) {
 		}
 		return encryptFile(source, target, key, objectID)
 	})
-	manifest, err := CaptureWithOptions(source, t.TempDir(), key, false, false, nil)
+	manifest, err := CaptureWithProgress(source, t.TempDir(), key, false, false, nil, nil)
 	if err != nil {
 		t.Fatalf("a vanished source must not abort capture: %v", err)
 	}
@@ -1654,7 +1654,7 @@ func TestCapturePartialInventoryDarwin(t *testing.T) {
 	// A Brewfile mixing supported intents and unsupported lines keeps the
 	// intents and records the exclusion.
 	messy := "brew git\nbrew \"\"\nvscode golang.go\n"
-	manifest, err := CaptureWithOptions(source, t.TempDir(), key, true, false, fakeRunnerWriter(messy))
+	manifest, err := CaptureWithProgress(source, t.TempDir(), key, true, false, fakeRunnerWriter(messy), nil)
 	if err != nil {
 		t.Fatalf("partial darwin inventory: %v", err)
 	}
@@ -1692,7 +1692,7 @@ func TestCaptureRecordsSettingAndDevRecipes(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := t.TempDir()
-	manifest, err := CaptureWithOptions(source, repository, key, false, false, stubRunner(nil, nil))
+	manifest, err := CaptureWithProgress(source, repository, key, false, false, stubRunner(nil, nil), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

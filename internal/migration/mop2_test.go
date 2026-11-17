@@ -48,7 +48,7 @@ func TestReadKeyShapes(t *testing.T) {
 	}
 	// CaptureWithOptions validates the key length itself.
 	source := t.TempDir()
-	if _, err := CaptureWithOptions(source, t.TempDir(), []byte("short"), false, false, nil); err == nil {
+	if _, err := CaptureWithProgress(source, t.TempDir(), []byte("short"), false, false, nil, nil); err == nil {
 		t.Fatal("capture accepted a short key")
 	}
 }
@@ -744,7 +744,7 @@ func TestCaptureDevSettingsUnreadable(t *testing.T) {
 	// never as a silent empty dev section.
 	repository := t.TempDir()
 	key := bytes.Repeat([]byte{73}, KeySize)
-	manifest, err := CaptureWithOptions(home, repository, key, false, false, stubRunner(nil, nil))
+	manifest, err := CaptureWithProgress(home, repository, key, false, false, stubRunner(nil, nil), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

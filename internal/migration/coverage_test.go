@@ -260,7 +260,7 @@ func TestRestoreWithOptionsDryRunAndApps(t *testing.T) {
 	defer restoreLookPath()
 
 	export := `{"Sources":[{"Packages":[{"PackageIdentifier":"Git.Git"}]}]}`
-	if _, err := CaptureWithOptions(source, repository, key, true, false, fakeRunnerWriter(export)); err != nil {
+	if _, err := CaptureWithProgress(source, repository, key, true, false, fakeRunnerWriter(export), nil); err != nil {
 		t.Fatalf("capture with applications: %v", err)
 	}
 	if _, err := DryRunRestore(repository, destination, keyPath, "personal", false); err != nil {

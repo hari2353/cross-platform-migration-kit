@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/haris/cross-platform-migration-kit/internal/migration"
 )
@@ -71,6 +72,24 @@ func keygen(args []string) error {
 	return nil
 }
 
+func cliProgress(command string) migration.ProgressFunc {
+	filter := migration.NewProgressFilter()
+	start := time.Now()
+	return func(done, total int64, currentPath string) {
+		if !filter.Report(done, total, currentPath) {
+			return
+		}
+		line := fmt.Sprintf("%s: %d/%d bytes", command, done, total)
+		if eta, ok := migration.EstimateETA(done, total, time.Since(start)); ok {
+			line += fmt.Sprintf(" eta %s", eta.Truncate(time.Second))
+		}
+		if currentPath != "" {
+			line += " — " + currentPath
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+}
+
 func capture(args []string) error {
 	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
 	source := flags.String("source", "", "source root; defaults to the current user's home directory")
@@ -101,7 +120,7 @@ func capture(args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := migration.CaptureWithOptions(*source, *repository, key, *includeApplications, *credentials, nil)
+	manifest, err := migration.CaptureWithProgress(*source, *repository, key, *includeApplications, *credentials, nil, cliProgress("capture"))
 	if err != nil {
 		return err
 	}
@@ -173,7 +192,7 @@ func restore(args []string) error {
 		}
 		return migration.WriteHumanReport(os.Stdout, report)
 	}
-	report, err := migration.ManagedRestore(*repository, *destination, *keyPath, *profile, *overwrite, *installApplications)
+	report, err := migration.ManagedRestoreWithProgress(*repository, *destination, *keyPath, *profile, *overwrite, *installApplications, cliProgress("restore"))
 	if err != nil {
 		// Completed rows still reach the operator even when the restore
 		// failed mid-way; a bare failure (no rows) reports only the error.
@@ -250,7 +269,7 @@ func resume(args []string) error {
 	if *profile != "personal" {
 		return fmt.Errorf("unsupported profile %q", *profile)
 	}
-	report, err := migration.ResumeRestore(*repository, *keyPath, *profile, *installApplications)
+	report, err := migration.ResumeRestoreWithProgress(*repository, *keyPath, *profile, *installApplications, cliProgress("resume"))
 	if err != nil {
 		return err
 	}

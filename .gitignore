@@ -29,3 +29,6 @@ docker-test-image.tar
 Thumbs.db
 .idea/
 .vscode/
+
+# stray self-copy left by an earlier copy mishap; never track
+/cross-platform-migration-kit/
