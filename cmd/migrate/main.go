@@ -74,14 +74,24 @@ func keygen(args []string) error {
 	return nil
 }
 
+func mbString(n int64) string {
+	return fmt.Sprintf("%.1f", float64(n)/(1024*1024))
+}
+
+func formatProgressLine(command string, files int, done, total int64) string {
+	return fmt.Sprintf("%s: %d files (%s/%s MB)", command, files, mbString(done), mbString(total))
+}
+
 func cliProgress(command string) migration.ProgressFunc {
 	filter := migration.NewProgressFilter()
 	start := time.Now()
+	files := 0
 	return func(done, total int64, currentPath string) {
+		files++
 		if !filter.Report(done, total, currentPath) {
 			return
 		}
-		line := fmt.Sprintf("%s: %d/%d bytes", command, done, total)
+		line := formatProgressLine(command, files, done, total)
 		if eta, ok := migration.EstimateETA(done, total, time.Since(start)); ok {
 			line += fmt.Sprintf(" eta %s", eta.Truncate(time.Second))
 		}

@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -137,5 +138,45 @@ func TestNilProgressIsSafe(t *testing.T) {
 	writeFile(t, filepath.Join(source, "Documents", "one.txt"), "one")
 	if _, err := CaptureWithProgress(source, repository, key, false, false, nil, nil); err != nil {
 		t.Fatalf("nil progress must not panic or fail: %v", err)
+	}
+}
+
+func TestCaptureProgressConvergesWhenFilesVanishMidCapture(t *testing.T) {
+	source := t.TempDir()
+	repository := filepath.Join(t.TempDir(), "repository")
+	key, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(source, "Documents", "one.txt"), "one")
+	writeFile(t, filepath.Join(source, "Documents", "two.txt"), "two")
+	// swap the encrypt seam so the first file "vanishes" between walk and
+	// encryption — its bytes must leave BOTH done and total
+	original := encryptObjectFunc
+	seen := 0
+	encryptObjectFunc = func(source, target string, key []byte, id string) error {
+		seen++
+		if seen == 1 {
+			if err := os.Remove(source); err != nil {
+				return err
+			}
+		}
+		return original(source, target, key, id)
+	}
+	t.Cleanup(func() { encryptObjectFunc = original })
+	var lastDone, lastTotal int64
+	var calls int
+	if _, err := CaptureWithProgress(source, repository, key, false, false, nil,
+		func(done, total int64, path string) {
+			calls++
+			lastDone, lastTotal = done, total
+		}); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("progress called %d times, want 1 (vanished file reports nothing)", calls)
+	}
+	if lastDone != lastTotal {
+		t.Fatalf("progress must converge when files vanish: done=%d total=%d", lastDone, lastTotal)
 	}
 }

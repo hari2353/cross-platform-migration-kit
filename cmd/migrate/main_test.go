@@ -282,3 +282,15 @@ func TestUndoCommandDispatchesAndReverts(t *testing.T) {
 		t.Fatalf("second undo must fail loudly")
 	}
 }
+
+func TestFormatProgressLineMatchesSpecFormat(t *testing.T) {
+	line := formatProgressLine("restore", 12, 4404019, 39918592) // 4.2MB / 38.1MB
+	want := "restore: 12 files (4.2/38.1 MB)"
+	if line != want {
+		t.Fatalf("formatProgressLine = %q, want %q", line, want)
+	}
+	small := formatProgressLine("capture", 3, 512, 1024)
+	if small != "capture: 3 files (0.0/0.0 MB)" {
+		t.Fatalf("small byte counts: %q", small)
+	}
+}

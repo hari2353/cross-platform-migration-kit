@@ -151,11 +151,17 @@ func UndoRestore(repository, destination, key string) (Report, error) {
 	}
 	report := NewReport("undo")
 	report.Destination = journal.Destination
+	var removedTargets []string
+	undone := 0
 	for _, entry := range journal.Entries {
 		current, ok := state.Items[entry.ID]
-		if !ok || current.Status != "copied" {
-			continue // the restore never changed this target
+		if !ok || current.Status != "copied" || current.UndoneIn == journal.Destination {
+			// journal consumed below — its backup objects are useless now
+			_ = os.Remove(undoObjectPath(repository, entry.ID))
+			continue // the restore never changed this target here
 		}
+		undone++
+		state.Items[entry.ID] = ItemState{Status: "copied", UndoneIn: journal.Destination}
 		switch entry.Pre {
 		case "absent":
 			if _, statErr := os.Stat(entry.Target); statErr != nil && os.IsNotExist(statErr) {
@@ -168,6 +174,7 @@ func UndoRestore(repository, destination, key string) (Report, error) {
 				return report, fmt.Errorf("remove restored %s: %w", entry.Target, err)
 			}
 			report.Add(Result{Kind: "file", ID: entry.ID, Path: entry.Target, Status: "removed"})
+			removedTargets = append(removedTargets, entry.Target)
 			report.Files++
 		case "present":
 			// streamed revert: temp + rename, digest-verified by decryptFile
@@ -182,10 +189,40 @@ func UndoRestore(repository, destination, key string) (Report, error) {
 			report.Files++
 		}
 	}
+	// a consumed journal makes its backup objects useless — delete them so
+	// the repository does not accumulate orphaned pre-state copies
+	for _, entry := range journal.Entries {
+		_ = os.Remove(undoObjectPath(repository, entry.ID))
+	}
+	// remove the empty directory skeleton the restore created, walking up
+	// from each removed file to the destination root; pre-existing dirs
+	// with their own content fail os.Remove and stop the walk naturally
+	for _, target := range removedTargets {
+		removeEmptyAncestors(target, journal.Destination)
+	}
+	if undone > 0 {
+		if err := SaveRestoreState(repository, keyBytes, state); err != nil {
+			return report, fmt.Errorf("record undone state: %w", err)
+		}
+	}
 	if err := os.Remove(undoJournalPath(repository, journal.Destination)); err != nil {
 		return report, fmt.Errorf("consume undo journal: %w", err)
 	}
 	report.Add(Result{Kind: "limitation", Status: "not-reverted", Detail: "applications and settings"})
 	report.Finish()
 	return report, nil
+}
+
+// removeEmptyAncestors deletes now-empty directories from path's parent up
+// to (but never including) stopRoot. os.Remove on a non-empty directory
+// fails, so pre-existing content stops the walk by itself.
+func removeEmptyAncestors(path, stopRoot string) {
+	for dir := filepath.Dir(path); dir != "" && dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		if stopRoot != "" && !isWithin(dir, stopRoot) {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return // non-empty, protected, or already gone: stop climbing
+		}
+	}
 }

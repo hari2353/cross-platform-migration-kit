@@ -16,6 +16,10 @@ const restoreStateFile = "restore-state.enc"
 type ItemState struct {
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	// UndoneIn records the destination an undo reverted this item for.
+	// Status describes the restore and stays "copied"; undoing one
+	// destination must not confuse undo for another.
+	UndoneIn string `json:"undone_in,omitempty"`
 }
 
 type RestoreState struct {

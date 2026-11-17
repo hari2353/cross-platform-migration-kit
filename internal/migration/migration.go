@@ -397,7 +397,9 @@ func CaptureWithProgress(sourceRoot, repository string, key []byte, includeAppli
 		if err := encryptObjectFunc(path, objectPath, key, item.ID); err != nil {
 			if isVanishedSource(err) {
 				// A file deleted between walk and encryption is a
-				// recorded skip, never a failed capture.
+				// recorded skip, never a failed capture. Its bytes leave
+				// the progress total too, so done converges to total.
+				totalBytes -= item.Size
 				exclusions = append(exclusions, Exclusion{RelativePath: item.RelativePath, Reason: "vanished during capture: " + err.Error()})
 				continue
 			}
